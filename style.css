@@ -648,24 +648,168 @@ select {
   margin: 0.25rem 0;
 }
 
+/* ── Panel handle (mobile only) ────────────────────────────── */
+.panel-handle {
+  display: none;
+}
+
 /* ── Responsive ────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  #editor {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
+  /* Upload */
+  .upload-content {
+    padding: 2.5rem 1.5rem;
   }
 
-  .controls-panel {
-    border-left: none;
-    border-top: 1px solid var(--border);
-    max-height: 50vh;
+  /* Editor grid: photo + thumb stack, controls as bottom sheet */
+  #editor {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+    min-height: calc(100vh - 56px);
+    padding-bottom: 72px; /* space for collapsed sheet */
+  }
+
+  .editor-left {
+    height: calc(100vh - 56px - 72px - 72px); /* viewport - header - thumb - collapsed sheet */
   }
 
   .comparison-container {
-    min-height: 50vh;
+    flex: 1;
+    padding: 0.5rem;
+    min-height: 0;
   }
 
-  .upload-content {
-    padding: 3rem 2rem;
+  #canvas-before,
+  #canvas-after {
+    max-height: calc(100vh - 56px - 72px - 72px - 1rem);
+  }
+
+  .thumb-strip {
+    min-height: 72px;
+  }
+
+  /* Bottom sheet */
+  .controls-panel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 300;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: 16px 16px 0 0;
+    max-height: 82vh;
+    height: auto;
+    /* Collapsed: only show handle bar */
+    transform: translateY(calc(100% - 72px));
+    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .controls-panel.sheet-open {
+    transform: translateY(0);
+    overflow-y: auto;
+  }
+
+  /* Drag handle */
+  .panel-handle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 1rem 0.5rem;
+    cursor: pointer;
+    flex-shrink: 0;
+    min-height: 52px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .handle-bar {
+    display: none; /* handled by centering trick instead */
+  }
+
+  .panel-handle::before {
+    content: '';
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 36px;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+  }
+
+  .panel-handle { position: relative; }
+
+  .handle-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 6px;
+  }
+
+  .handle-chevron {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-top: 6px;
+    transition: transform 0.3s;
+  }
+
+  .controls-panel.sheet-open .handle-chevron {
+    transform: rotate(180deg);
+  }
+
+  /* Touch targets */
+  input[type="range"] {
+    height: 20px;
+    padding: 8px 0;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    width: 22px;
+    height: 22px;
+  }
+
+  .size-btn {
+    padding: 0.6rem 0.25rem;
+    font-size: 0.72rem;
+  }
+
+  .btn-download,
+  .btn-download-all,
+  .btn-add,
+  .btn-reset {
+    padding: 0.85rem;
+    font-size: 0.9rem;
+  }
+
+  .slider-row {
+    margin-bottom: 1rem;
+  }
+
+  /* Header */
+  header p { display: none; }
+  header h1 { font-size: 0.95rem; }
+
+  /* Upload */
+  .upload-title { font-size: 0.95rem; }
+  .upload-content { padding: 2rem 1.25rem; }
+
+  /* Face status */
+  .face-status {
+    font-size: 0.72rem;
+  }
+
+  /* Bottom actions sticky inside sheet */
+  .bottom-actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--surface);
+    padding: 0.75rem 0 0;
+    border-top: 1px solid var(--border);
+    margin-top: auto;
   }
 }

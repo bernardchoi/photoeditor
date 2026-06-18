@@ -65,8 +65,14 @@
         <div class="thumb-strip" id="thumb-strip"></div>
       </div>
 
-      <!-- Controls -->
-      <aside class="controls-panel">
+      <!-- Controls (desktop: sidebar / mobile: bottom sheet) -->
+      <aside class="controls-panel" id="controls-panel">
+        <!-- Mobile drag handle -->
+        <div class="panel-handle" id="panel-handle">
+          <div class="handle-bar"></div>
+          <span class="handle-label">보정 설정</span>
+          <span class="handle-chevron" id="handle-chevron">▲</span>
+        </div>
         <!-- Status -->
         <div id="face-status" class="face-status">얼굴 감지 대기 중...</div>
 

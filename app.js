@@ -149,8 +149,11 @@ async function setActive(idx) {
   const img = p.image;
 
   // Size canvases
-  const maxW = (window.innerWidth - 320) * 0.95;
-  const maxH = (window.innerHeight - 56 - 72) * 0.95;
+  const mobile = window.innerWidth <= 768;
+  const maxW = mobile ? window.innerWidth * 0.98 : (window.innerWidth - 320) * 0.95;
+  const maxH = mobile
+    ? (window.innerHeight - 56 - 72 - 72) * 0.95   // minus header, thumb, collapsed sheet
+    : (window.innerHeight - 56 - 72) * 0.95;
   const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight, 1);
   const dW = Math.round(img.naturalWidth * scale);
   const dH = Math.round(img.naturalHeight * scale);
@@ -626,6 +629,38 @@ const tick  = () => new Promise(r => setTimeout(r, 30));
 function showProc(msg, sub = '') { procText.textContent = msg; procSub.textContent = sub; procOverlay.classList.remove('hidden'); }
 function setProc(msg)  { procText.textContent = msg; }
 function hideProc()    { procOverlay.classList.add('hidden'); }
+
+// ── Mobile Bottom Sheet ───────────────────────────────────────
+(function initBottomSheet() {
+  const panel   = $('controls-panel');
+  const handle  = $('panel-handle');
+  if (!handle) return;
+
+  let startY = 0, startOpen = false, dragging = false;
+
+  function isMobile() { return window.innerWidth <= 768; }
+
+  handle.addEventListener('click', () => {
+    if (!isMobile()) return;
+    panel.classList.toggle('sheet-open');
+  });
+
+  // Touch drag to open/close
+  handle.addEventListener('touchstart', e => {
+    if (!isMobile()) return;
+    startY = e.touches[0].clientY;
+    startOpen = panel.classList.contains('sheet-open');
+    dragging = true;
+  }, { passive: true });
+
+  document.addEventListener('touchend', e => {
+    if (!dragging || !isMobile()) return;
+    dragging = false;
+    const dy = e.changedTouches[0].clientY - startY;
+    if (startOpen && dy > 60)       panel.classList.remove('sheet-open');
+    else if (!startOpen && dy < -60) panel.classList.add('sheet-open');
+  }, { passive: true });
+})();
 
 // ── Boot ──────────────────────────────────────────────────────
 loadFaceApi();
