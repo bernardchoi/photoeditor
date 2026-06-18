@@ -17,7 +17,10 @@ const state = {
   faceApiLoaded: false,
   selectedSize: 'original',
   sliderPos: 0.5,
-  params: { brightness: 0, contrast: 0, saturation: 0, sharpness: 30, skinSmooth: 50 },
+  params: {
+    brightness: 0, contrast: 0, saturation: 0, sharpness: 30, skinSmooth: 50,
+    temperature: 0, highlights: 0, shadows: 0, clarity: 0, noiseReduction: 0,
+  },
 };
 
 // ── DOM ───────────────────────────────────────────────────────
@@ -388,11 +391,15 @@ function applyProcessing() {
   applyAutoLevels(d, p.autoCorr.levels);
   applyWhiteBalance(d, p.autoCorr.wb);
   applyBCS(d, state.params.brightness, state.params.contrast, state.params.saturation);
+  applyTemperature(d, state.params.temperature);
+  applyHighlightsShadows(d, state.params.highlights, state.params.shadows);
 
   ctxAfter.putImageData(id, 0, 0);
 
-  if (state.params.sharpness > 0) unsharpMask(ctxAfter, W, H, state.params.sharpness / 100);
-  if (state.params.skinSmooth > 0) skinSmooth(ctxAfter, W, H, state.params.skinSmooth / 100, p.faceDetections);
+  if (state.params.noiseReduction > 0) applyNoiseReduction(ctxAfter, W, H, state.params.noiseReduction / 100);
+  if (state.params.clarity > 0)        applyClarity(ctxAfter, W, H, state.params.clarity);
+  if (state.params.sharpness > 0)      unsharpMask(ctxAfter, W, H, state.params.sharpness / 100);
+  if (state.params.skinSmooth > 0)     skinSmooth(ctxAfter, W, H, state.params.skinSmooth / 100, p.faceDetections);
 
   updateClip();
 }
@@ -431,6 +438,80 @@ function applyBCS(d, br, co, sa) {
     d[i+1] = clamp(gr + (g - gr) * sf);
     d[i+2] = clamp(gr + (b - gr) * sf);
   }
+}
+
+// ── Temperature ───────────────────────────────────────────────
+function applyTemperature(d, amount) {
+  if (!amount) return;
+  const rv = amount * 0.8, bv = -amount * 0.8;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i]   = clamp(d[i]   + rv);
+    d[i+2] = clamp(d[i+2] + bv);
+  }
+}
+
+// ── Highlights / Shadows ──────────────────────────────────────
+function applyHighlightsShadows(d, highlights, shadows) {
+  if (!highlights && !shadows) return;
+  const hf = highlights / 100, sf = shadows / 100;
+  for (let i = 0; i < d.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      const v = d[i + c] / 255;
+      // highlight weight: high luminance pixels
+      const hw = v * v;
+      // shadow weight: low luminance pixels
+      const sw = (1 - v) * (1 - v);
+      const nv = v + hf * hw * (1 - v) - hf * hw * v * 0.5
+                   + sf * sw * (1 - v) * 0.8;
+      d[i + c] = clamp(Math.round(nv * 255));
+    }
+  }
+}
+
+// ── Clarity (midtone contrast / local contrast) ───────────────
+function applyClarity(ctx, W, H, amount) {
+  if (!amount) return;
+  const orig = ctx.getImageData(0, 0, W, H);
+  const blur = new ImageData(new Uint8ClampedArray(orig.data), W, H);
+  // large radius blur for local contrast
+  const r = Math.max(4, Math.round(W / 80));
+  boxBlur(blur, r); boxBlur(blur, r); boxBlur(blur, r);
+  const d = orig.data, b = blur.data;
+  const str = (amount / 100) * 0.7;
+  for (let i = 0; i < d.length; i += 4) {
+    const lum = (d[i] + d[i+1] + d[i+2]) / 3 / 255;
+    // only boost midtones (avoid blowing highlights/crushing shadows)
+    const mid = 1 - Math.abs(lum - 0.5) * 2;
+    const w = str * mid;
+    d[i]   = clamp(d[i]   + w * (d[i]   - b[i]));
+    d[i+1] = clamp(d[i+1] + w * (d[i+1] - b[i+1]));
+    d[i+2] = clamp(d[i+2] + w * (d[i+2] - b[i+2]));
+  }
+  ctx.putImageData(orig, 0, 0);
+}
+
+// ── Noise Reduction ───────────────────────────────────────────
+function applyNoiseReduction(ctx, W, H, amount) {
+  if (!amount) return;
+  const orig = ctx.getImageData(0, 0, W, H);
+  const smth = new ImageData(new Uint8ClampedArray(orig.data), W, H);
+  const r = Math.round(1 + (amount / 100) * 2);
+  boxBlur(smth, r); boxBlur(smth, r);
+  const d = orig.data, s = smth.data;
+  // edge-preserving blend: where there's little detail, use smoothed version
+  const str = amount / 100;
+  for (let i = 0; i < d.length; i += 4) {
+    const diffR = Math.abs(d[i] - s[i]);
+    const diffG = Math.abs(d[i+1] - s[i+1]);
+    const diffB = Math.abs(d[i+2] - s[i+2]);
+    const edge = Math.max(diffR, diffG, diffB) / 255;
+    // less blending on edges (edge > 0.15), more on flat areas
+    const blend = str * Math.max(0, 1 - edge * 5);
+    d[i]   = clamp(d[i]   * (1 - blend) + s[i]   * blend);
+    d[i+1] = clamp(d[i+1] * (1 - blend) + s[i+1] * blend);
+    d[i+2] = clamp(d[i+2] * (1 - blend) + s[i+2] * blend);
+  }
+  ctx.putImageData(orig, 0, 0);
 }
 
 // ── Sharpening ────────────────────────────────────────────────
@@ -592,6 +673,8 @@ function updateClip() {
 const PARAM_MAP = {
   'brightness': 'brightness', 'contrast': 'contrast', 'saturation': 'saturation',
   'sharpness': 'sharpness',   'skin-smooth': 'skinSmooth',
+  'temperature': 'temperature', 'highlights': 'highlights', 'shadows': 'shadows',
+  'clarity': 'clarity', 'noise-reduction': 'noiseReduction',
 };
 
 let debounce = null;
@@ -647,9 +730,13 @@ async function exportPhoto(idx) {
   applyAutoLevels(d, fullAutoCorr.levels);
   applyWhiteBalance(d, fullAutoCorr.wb);
   applyBCS(d, state.params.brightness, state.params.contrast, state.params.saturation);
+  applyTemperature(d, state.params.temperature);
+  applyHighlightsShadows(d, state.params.highlights, state.params.shadows);
   fx.putImageData(id, 0, 0);
 
-  if (state.params.sharpness > 0) unsharpMask(fx, oW, oH, state.params.sharpness / 100);
+  if (state.params.noiseReduction > 0) applyNoiseReduction(fx, oW, oH, state.params.noiseReduction / 100);
+  if (state.params.clarity > 0)        applyClarity(fx, oW, oH, state.params.clarity);
+  if (state.params.sharpness > 0)      unsharpMask(fx, oW, oH, state.params.sharpness / 100);
 
   if (state.params.skinSmooth > 0) {
     if (p.faceDetections.length > 0) {

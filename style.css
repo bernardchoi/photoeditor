@@ -124,7 +124,7 @@ header p {
 /* ── Editor Layout ─────────────────────────────────────────── */
 #editor {
   display: grid;
-  grid-template-columns: 1fr 300px;
+  grid-template-columns: 1fr 330px;
   min-height: calc(100vh - 56px);
   position: relative;
 }
@@ -425,7 +425,7 @@ header p {
 /* Sliders */
 .slider-row {
   display: grid;
-  grid-template-columns: 68px 1fr 36px;
+  grid-template-columns: 80px 1fr 36px;
   align-items: center;
   gap: 0.6rem;
 }
