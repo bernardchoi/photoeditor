@@ -32,8 +32,8 @@ const procText      = $('processing-text');
 const procSub       = $('processing-sub');
 const canvasBefore  = $('canvas-before');
 const canvasAfter   = $('canvas-after');
-const ctxBefore     = canvasBefore.getContext('2d');
-const ctxAfter      = canvasAfter.getContext('2d');
+const ctxBefore     = canvasBefore.getContext('2d', { willReadFrequently: true });
+const ctxAfter      = canvasAfter.getContext('2d',  { willReadFrequently: true });
 const cmpSlider     = $('comparison-slider');
 const faceStatusEl  = $('face-status');
 const downloadBtn   = $('download-btn');
@@ -114,6 +114,7 @@ async function loadImages(files, isFirst) {
       image: img.image,
       name: img.name,
       objectURL: img.objectURL,
+      orientation: img.orientation || 1,
       autoCorr: null,
       faceDetections: [],
       displayW: 0,
@@ -130,14 +131,72 @@ async function loadImages(files, isFirst) {
   hideProc();
 }
 
-function loadImageFile(file) {
+async function loadImageFile(file) {
+  const orientation = await readExifOrientation(file);
+  const url = URL.createObjectURL(file);
   return new Promise(resolve => {
-    const url = URL.createObjectURL(file);
     const img = new Image();
-    img.onload = () => resolve({ image: img, name: file.name, objectURL: url });
+    img.onload = () => resolve({ image: img, name: file.name, objectURL: url, orientation });
     img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
     img.src = url;
   });
+}
+
+// Read JPEG EXIF orientation tag (no external library needed)
+function readExifOrientation(file) {
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const view = new DataView(e.target.result);
+        if (view.getUint16(0, false) !== 0xFFD8) { resolve(1); return; }
+        let offset = 2;
+        while (offset < view.byteLength) {
+          const marker = view.getUint16(offset, false);
+          offset += 2;
+          if (marker === 0xFFE1) {
+            offset += 2;
+            if (view.getUint32(offset, false) !== 0x45786966) { resolve(1); return; }
+            const little = view.getUint16(offset + 6, false) === 0x4949;
+            offset += 6 + view.getUint32(offset + 10, little) * 1;
+            const tags = view.getUint16(offset + 4, little);
+            offset += 6;
+            for (let i = 0; i < tags; i++) {
+              if (view.getUint16(offset + i * 12, little) === 0x0112) {
+                resolve(view.getUint16(offset + i * 12 + 8, little));
+                return;
+              }
+            }
+          } else if ((marker & 0xFF00) !== 0xFF00) break;
+          else offset += view.getUint16(offset, false);
+        }
+      } catch {}
+      resolve(1);
+    };
+    reader.onerror = () => resolve(1);
+    reader.readAsArrayBuffer(file.slice(0, 65536));
+  });
+}
+
+// Draw image onto ctx with correct EXIF orientation applied
+function drawImageOriented(ctx, img, orientation, cW, cH) {
+  const o = orientation || 1;
+  if (o === 1) { ctx.drawImage(img, 0, 0, cW, cH); return; }
+  ctx.save();
+  // Orientations 5-8 rotate 90/270°, so source w/h are swapped relative to canvas
+  const sw = (o >= 5) ? cH : cW;
+  const sh = (o >= 5) ? cW : cH;
+  switch (o) {
+    case 2: ctx.transform(-1,  0,  0,  1, cW,  0); break;
+    case 3: ctx.transform(-1,  0,  0, -1, cW, cH); break;
+    case 4: ctx.transform( 1,  0,  0, -1,  0, cH); break;
+    case 5: ctx.transform( 0,  1,  1,  0,  0,  0); break;
+    case 6: ctx.transform( 0,  1, -1,  0, cH,  0); break;  // iPhone portrait
+    case 7: ctx.transform( 0, -1, -1,  0, cH, cW); break;
+    case 8: ctx.transform( 0, -1,  1,  0,  0, cW); break;
+  }
+  ctx.drawImage(img, 0, 0, sw, sh);
+  ctx.restore();
 }
 
 // ── Active Photo ──────────────────────────────────────────────
@@ -148,21 +207,27 @@ async function setActive(idx) {
   const p = state.photos[idx];
   const img = p.image;
 
-  // Size canvases
+  // EXIF orientation: rotations 5-8 swap width/height
+  const o = p.orientation || 1;
+  const swap = o >= 5;
+  const naturalW = swap ? img.naturalHeight : img.naturalWidth;
+  const naturalH = swap ? img.naturalWidth  : img.naturalHeight;
+
+  // Size canvases to fit display area
   const mobile = window.innerWidth <= 768;
   const maxW = mobile ? window.innerWidth * 0.98 : (window.innerWidth - 320) * 0.95;
   const maxH = mobile
-    ? (window.innerHeight - 56 - 72 - 72) * 0.95   // minus header, thumb, collapsed sheet
+    ? (window.innerHeight - 56 - 72 - 72) * 0.95
     : (window.innerHeight - 56 - 72) * 0.95;
-  const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight, 1);
-  const dW = Math.round(img.naturalWidth * scale);
-  const dH = Math.round(img.naturalHeight * scale);
+  const scale = Math.min(maxW / naturalW, maxH / naturalH, 1);
+  const dW = Math.round(naturalW * scale);
+  const dH = Math.round(naturalH * scale);
   p.displayW = dW;
   p.displayH = dH;
 
   canvasBefore.width = dW;  canvasBefore.height = dH;
   canvasAfter.width  = dW;  canvasAfter.height  = dH;
-  ctxBefore.drawImage(img, 0, 0, dW, dH);
+  drawImageOriented(ctxBefore, img, o, dW, dH);
 
   // First-time prep for this photo
   if (!p.ready) {
@@ -523,11 +588,14 @@ async function exportPhoto(idx) {
   if (!p) return;
 
   const img = p.image;
-  const oW = img.naturalWidth, oH = img.naturalHeight;
+  const o = p.orientation || 1;
+  const swap = o >= 5;
+  const oW = swap ? img.naturalHeight : img.naturalWidth;
+  const oH = swap ? img.naturalWidth  : img.naturalHeight;
 
   const fc = Object.assign(document.createElement('canvas'), { width: oW, height: oH });
-  const fx = fc.getContext('2d');
-  fx.drawImage(img, 0, 0, oW, oH);
+  const fx = fc.getContext('2d', { willReadFrequently: true });
+  drawImageOriented(fx, img, o, oW, oH);
 
   // Recompute auto correction at full resolution
   const fullAutoCorr = computeAutoCorr(fx.getImageData(0, 0, oW, oH));
