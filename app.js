@@ -10,6 +10,14 @@ const PRINT_SIZES = {
   'a4':   { w: 2480, h: 3508 },
 };
 
+const DEFAULT_PARAMS = Object.freeze({
+  brightness: 0, contrast: 0, saturation: 0, sharpness: 30, skinSmooth: 50,
+  temperature: 0, highlights: 0, shadows: 0, clarity: 0, noiseReduction: 0,
+});
+
+const makeDefaultParams = () => ({ ...DEFAULT_PARAMS });
+const makeDefaultCrop = () => ({ zoom: 1, x: 0.5, y: 0.5, autoFramed: false });
+
 // ── State ─────────────────────────────────────────────────────
 const state = {
   photos: [],        // [{ image, name, autoCorr, faceDetections, displayW, displayH, ready }]
@@ -17,11 +25,9 @@ const state = {
   faceApiLoaded: false,
   selectedSize: 'original',
   sliderPos: 0.5,
-  params: {
-    brightness: 0, contrast: 0, saturation: 0, sharpness: 30, skinSmooth: 50,
-    temperature: 0, highlights: 0, shadows: 0, clarity: 0, noiseReduction: 0,
-  },
+  params: makeDefaultParams(),
 };
+let faceApiReadyPromise = null;
 
 // ── DOM ───────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -44,18 +50,25 @@ const downloadAllBtn = $('download-all-btn');
 const totalCountEl  = $('total-count');
 const thumbStrip    = $('thumb-strip');
 const photoCounter  = $('photo-counter');
+const cropGuide     = $('crop-guide');
+const cropControls  = $('crop-controls');
 
 // ── Face API ──────────────────────────────────────────────────
 async function loadFaceApi() {
-  const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
+  const MODEL_URL = './models';
+  faceStatusEl.textContent = '얼굴 감지 모델 준비 중...';
   try {
+    if (typeof faceapi === 'undefined') throw new Error('face-api library unavailable');
     await Promise.all([
       faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
       faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
     ]);
     state.faceApiLoaded = true;
+    faceStatusEl.textContent = '얼굴 감지 준비 완료';
   } catch (e) {
     console.warn('face-api models failed:', e);
+    faceStatusEl.textContent = '얼굴 감지 준비 실패 — 색조 기반 보정';
+    showToast('얼굴 감지 모델을 준비하지 못했습니다. 새로고침 후 다시 시도해주세요.', 'info');
   }
 }
 
@@ -83,9 +96,13 @@ addInput.addEventListener('change', e => {
 });
 
 $('reset-btn').addEventListener('click', () => {
-  state.photos.forEach(p => p.objectURL && URL.revokeObjectURL(p.objectURL));
+  state.photos.forEach(p => {
+    p.objectURL && URL.revokeObjectURL(p.objectURL);
+    p.image?.close?.();
+  });
   state.photos = [];
   state.activeIdx = -1;
+  state.params = makeDefaultParams();
   editor.classList.add('hidden');
   uploadZone.style.display = '';
   fileInput.value = '';
@@ -137,6 +154,8 @@ async function loadImages(files, isFirst) {
       objectURL: img.objectURL,
       orientation: img.orientation || 1,
       sizeMB: img.sizeMB || 0,
+      params: makeDefaultParams(),
+      crop: makeDefaultCrop(),
       autoCorr: null,
       faceDetections: [],
       displayW: 0,
@@ -160,12 +179,32 @@ async function loadImageFile(file) {
   ]);
   if (adobeRgb) showToast('Adobe RGB 색공간이 감지됐습니다.\n브라우저는 sRGB로 표시하므로 색감이 다소 달라 보일 수 있습니다.', 'info');
   const url = URL.createObjectURL(file);
+
+  // Modern mobile browsers may apply EXIF rotation while decoding an <img>.
+  // ImageBitmap gives us one normalized, already-oriented source and prevents
+  // the manual EXIF transform from being applied twice on iOS/Android.
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      return { image: bitmap, name: file.name, objectURL: url, orientation: 1, sizeMB: (file.size / 1e6).toFixed(1) };
+    } catch (e) {
+      console.warn('ImageBitmap decode fallback:', e);
+    }
+  }
+
   return new Promise(resolve => {
     const img = new Image();
     img.onload = () => resolve({ image: img, name: file.name, objectURL: url, orientation, sizeMB: (file.size / 1e6).toFixed(1) });
     img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
     img.src = url;
   });
+}
+
+function getImageSize(img) {
+  return {
+    w: img.naturalWidth || img.width,
+    h: img.naturalHeight || img.height,
+  };
 }
 
 // Read JPEG EXIF orientation tag (no external library needed)
@@ -241,34 +280,61 @@ function drawImageOriented(ctx, img, orientation, cW, cH) {
   ctx.restore();
 }
 
+async function detectFacesForPhoto(p, targetW, targetH) {
+  if (!state.faceApiLoaded) return [];
+  const source = getImageSize(p.image);
+  const swap = (p.orientation || 1) >= 5;
+  const naturalW = swap ? source.h : source.w;
+  const naturalH = swap ? source.w : source.h;
+  const scale = Math.min(1, 1280 / Math.max(naturalW, naturalH));
+  const width = Math.max(1, Math.round(naturalW * scale));
+  const height = Math.max(1, Math.round(naturalH * scale));
+  const canvas = Object.assign(document.createElement('canvas'), { width, height });
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  drawImageOriented(ctx, p.image, p.orientation, width, height);
+
+  const detections = await faceapi
+    .detectAllFaces(canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.25 }))
+    .withFaceLandmarks();
+  return faceapi.resizeResults(detections, { width: targetW, height: targetH });
+}
+
 // ── Active Photo ──────────────────────────────────────────────
 async function setActive(idx) {
   if (idx < 0 || idx >= state.photos.length) return;
   state.activeIdx = idx;
 
   const p = state.photos[idx];
+  state.params = p.params;
+  syncParamControls();
   const img = p.image;
+  const imageSize = getImageSize(img);
 
   // EXIF orientation: rotations 5-8 swap width/height
   const o = p.orientation || 1;
   const swap = o >= 5;
-  const naturalW = swap ? img.naturalHeight : img.naturalWidth;
-  const naturalH = swap ? img.naturalWidth  : img.naturalHeight;
+  const naturalW = swap ? imageSize.h : imageSize.w;
+  const naturalH = swap ? imageSize.w : imageSize.h;
 
   // Size canvases to fit display area
   const mobile = window.innerWidth <= 768;
-  const maxW = mobile ? window.innerWidth * 0.98 : (window.innerWidth - 320) * 0.95;
-  const maxH = mobile
-    ? (window.innerHeight - 56 - 72 - 72) * 0.95
-    : (window.innerHeight - 56 - 72) * 0.95;
+  const container = document.querySelector('.comparison-container');
+  const maxW = Math.max(120, container.clientWidth - (mobile ? 16 : 48));
+  const maxH = Math.max(120, container.clientHeight - (mobile ? 16 : 28));
   const scale = Math.min(maxW / naturalW, maxH / naturalH, 1);
-  const dW = Math.round(naturalW * scale);
-  const dH = Math.round(naturalH * scale);
+  const cssW = Math.max(1, Math.round(naturalW * scale));
+  const cssH = Math.max(1, Math.round(naturalH * scale));
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const pixelScale = Math.min(dpr, naturalW / cssW, naturalH / cssH);
+  const dW = Math.max(1, Math.round(cssW * pixelScale));
+  const dH = Math.max(1, Math.round(cssH * pixelScale));
   p.displayW = dW;
   p.displayH = dH;
 
   canvasBefore.width = dW;  canvasBefore.height = dH;
   canvasAfter.width  = dW;  canvasAfter.height  = dH;
+  canvasBefore.style.width = `${cssW}px`; canvasBefore.style.height = `${cssH}px`;
+  canvasAfter.style.width  = `${cssW}px`; canvasAfter.style.height  = `${cssH}px`;
   drawImageOriented(ctxBefore, img, o, dW, dH);
 
   // First-time prep for this photo
@@ -278,14 +344,14 @@ async function setActive(idx) {
     p.rawPixels = new Uint8ClampedArray(raw.data); // cache for applyProcessing
     p.autoCorr = computeAutoCorr(raw);
 
+    if (faceApiReadyPromise) await faceApiReadyPromise;
     if (state.faceApiLoaded) {
       setProc(`얼굴 감지 중... (${idx + 1}/${state.photos.length})`);
       try {
-        p.faceDetections = await faceapi
-          .detectAllFaces(canvasBefore, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.4 }))
-          .withFaceLandmarks();
+        p.faceDetections = await detectFacesForPhoto(p, dW, dH);
       } catch { p.faceDetections = []; }
     }
+    autoFramePhoto(p);
     p.ready = true;
     thumbStrip.querySelector(`[data-idx="${idx}"]`)?.classList.add('ready');
     hideProc();
@@ -295,9 +361,16 @@ async function setActive(idx) {
   applyProcessing();
   updateThumbActive();
   updateSliderAfterResize();
+  syncCropControls();
+  updateCropGuide();
 }
 
 function updateFaceStatus(dets) {
+  if (!state.faceApiLoaded) {
+    faceStatusEl.textContent = '얼굴 감지 사용 불가 — 색조 기반 보정';
+    faceStatusEl.classList.remove('detected');
+    return;
+  }
   const n = dets.length;
   faceStatusEl.textContent = n > 0 ? `얼굴 ${n}명 감지 ✓` : '얼굴 미감지 — 색조 기반 보정';
   faceStatusEl.classList.toggle('detected', n > 0);
@@ -392,16 +465,17 @@ function applyProcessing() {
 
   applyAutoLevels(d, p.autoCorr.levels);
   applyWhiteBalance(d, p.autoCorr.wb);
-  applyBCS(d, state.params.brightness, state.params.contrast, state.params.saturation);
-  applyTemperature(d, state.params.temperature);
-  applyHighlightsShadows(d, state.params.highlights, state.params.shadows);
+  const params = p.params;
+  applyBCS(d, params.brightness, params.contrast, params.saturation);
+  applyTemperature(d, params.temperature);
+  applyHighlightsShadows(d, params.highlights, params.shadows);
 
   ctxAfter.putImageData(id, 0, 0);
 
-  if (state.params.noiseReduction > 0) applyNoiseReduction(ctxAfter, W, H, state.params.noiseReduction / 100);
-  if (state.params.clarity > 0)        applyClarity(ctxAfter, W, H, state.params.clarity);
-  if (state.params.sharpness > 0)      unsharpMask(ctxAfter, W, H, state.params.sharpness / 100);
-  if (state.params.skinSmooth > 0)     skinSmooth(ctxAfter, W, H, state.params.skinSmooth / 100, p.faceDetections);
+  if (params.noiseReduction > 0) applyNoiseReduction(ctxAfter, W, H, params.noiseReduction / 100);
+  if (params.clarity > 0)        applyClarity(ctxAfter, W, H, params.clarity);
+  if (params.sharpness > 0)      unsharpMask(ctxAfter, W, H, params.sharpness / 100);
+  if (params.skinSmooth > 0)     skinSmooth(ctxAfter, W, H, params.skinSmooth / 100, p.faceDetections);
 
   updateClip();
 }
@@ -681,6 +755,110 @@ function updateClip() {
   cmpSlider.style.left = `${p * 100}%`;
 }
 
+// ── Print crop / automatic face framing ─────────────────────
+function getPhotoDimensions(p) {
+  const swap = (p.orientation || 1) >= 5;
+  const source = getImageSize(p.image);
+  return {
+    w: swap ? source.h : source.w,
+    h: swap ? source.w : source.h,
+  };
+}
+
+function getPrintTarget(p) {
+  const preset = PRINT_SIZES[state.selectedSize];
+  if (!preset) return null;
+  const { w, h } = getPhotoDimensions(p);
+  return w > h ? { w: preset.h, h: preset.w } : { ...preset };
+}
+
+function calculateCropRect(sourceW, sourceH, targetW, targetH, crop) {
+  const sourceAR = sourceW / sourceH;
+  const targetAR = targetW / targetH;
+  let baseW = sourceW, baseH = sourceH;
+  if (sourceAR > targetAR) baseW = sourceH * targetAR;
+  else baseH = sourceW / targetAR;
+
+  const zoom = Math.max(1, crop.zoom || 1);
+  const sw = baseW / zoom;
+  const sh = baseH / zoom;
+  const sx = (sourceW - sw) * Math.max(0, Math.min(1, crop.x));
+  const sy = (sourceH - sh) * Math.max(0, Math.min(1, crop.y));
+  return { sx, sy, sw, sh };
+}
+
+function autoFramePhoto(p) {
+  if (!p || !p.displayW || !p.displayH) return;
+  const target = getPrintTarget(p);
+  const crop = p.crop || (p.crop = makeDefaultCrop());
+  crop.zoom = 1;
+
+  if (!p.faceDetections.length || !target) {
+    crop.x = 0.5;
+    crop.y = 0.5;
+    crop.autoFramed = true;
+    return;
+  }
+
+  const points = p.faceDetections.flatMap(det => det.landmarks.positions);
+  const xs = points.map(pt => pt.x), ys = points.map(pt => pt.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const faceW = Math.max(1, maxX - minX), faceH = Math.max(1, maxY - minY);
+  const needW = Math.min(p.displayW, faceW * 2.0);
+  const needH = Math.min(p.displayH, faceH * 2.4);
+  const base = calculateCropRect(p.displayW, p.displayH, target.w, target.h, makeDefaultCrop());
+  crop.zoom = Math.max(1, Math.min(1.35, Math.min(base.sw / needW, base.sh / needH)));
+
+  const rect = calculateCropRect(p.displayW, p.displayH, target.w, target.h, crop);
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2 - faceH * 0.12;
+  crop.x = p.displayW === rect.sw ? 0.5 : (centerX - rect.sw / 2) / (p.displayW - rect.sw);
+  crop.y = p.displayH === rect.sh ? 0.5 : (centerY - rect.sh / 2) / (p.displayH - rect.sh);
+  crop.x = Math.max(0, Math.min(1, crop.x));
+  crop.y = Math.max(0, Math.min(1, crop.y));
+  crop.autoFramed = true;
+}
+
+function updateCropGuide() {
+  const p = state.photos[state.activeIdx];
+  const target = p && getPrintTarget(p);
+  if (!p || !target || !p.displayW || !p.displayH) {
+    cropGuide.classList.add('hidden');
+    cropControls.classList.add('hidden');
+    return;
+  }
+  const rect = calculateCropRect(p.displayW, p.displayH, target.w, target.h, p.crop);
+  cropGuide.classList.remove('hidden');
+  cropControls.classList.remove('hidden');
+  cropGuide.style.left = `${rect.sx / p.displayW * 100}%`;
+  cropGuide.style.top = `${rect.sy / p.displayH * 100}%`;
+  cropGuide.style.width = `${rect.sw / p.displayW * 100}%`;
+  cropGuide.style.height = `${rect.sh / p.displayH * 100}%`;
+}
+
+function syncCropControls() {
+  const p = state.photos[state.activeIdx];
+  if (!p) return;
+  $('crop-zoom').value = Math.round(p.crop.zoom * 100);
+  $('crop-x').value = Math.round(p.crop.x * 100);
+  $('crop-y').value = Math.round(p.crop.y * 100);
+  $('crop-zoom-val').textContent = `${Math.round(p.crop.zoom * 100)}%`;
+  $('crop-x-val').textContent = Math.round(p.crop.x * 100);
+  $('crop-y-val').textContent = Math.round(p.crop.y * 100);
+  $('crop-status').textContent = p.faceDetections.length
+    ? `얼굴 ${p.faceDetections.length}명 중심 자동 맞춤`
+    : '가운데 자동 맞춤';
+}
+
+function syncParamControls() {
+  for (const [id, key] of Object.entries(PARAM_MAP)) {
+    const value = state.params[key];
+    $(id).value = value;
+    $(`${id}-val`).textContent = value;
+  }
+}
+
 // ── Controls ──────────────────────────────────────────────────
 const PARAM_MAP = {
   'brightness': 'brightness', 'contrast': 'contrast', 'saturation': 'saturation',
@@ -702,12 +880,63 @@ for (const id of Object.keys(PARAM_MAP)) {
   });
 }
 
+$('apply-all-btn').addEventListener('click', () => {
+  const current = state.photos[state.activeIdx];
+  if (!current) return;
+  state.photos.forEach(p => { p.params = { ...current.params }; });
+  state.params = current.params;
+  showToast(`${state.photos.length}장에 현재 보정 설정을 적용했습니다.`, 'info');
+});
+
+$('reset-photo-btn').addEventListener('click', () => {
+  const current = state.photos[state.activeIdx];
+  if (!current) return;
+  current.params = makeDefaultParams();
+  state.params = current.params;
+  syncParamControls();
+  applyProcessing();
+  showToast('현재 사진 보정을 초기화했습니다.', 'info');
+});
+
 document.querySelectorAll('.size-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     state.selectedSize = btn.dataset.size;
+    const p = state.photos[state.activeIdx];
+    if (p && state.selectedSize !== 'original') autoFramePhoto(p);
+    syncCropControls();
+    updateCropGuide();
   });
+});
+
+for (const [id, key, scale] of [
+  ['crop-zoom', 'zoom', 100], ['crop-x', 'x', 100], ['crop-y', 'y', 100],
+]) {
+  $(id).addEventListener('input', function () {
+    const p = state.photos[state.activeIdx];
+    if (!p) return;
+    p.crop[key] = +this.value / scale;
+    p.crop.autoFramed = false;
+    syncCropControls();
+    updateCropGuide();
+  });
+}
+
+$('auto-crop-btn').addEventListener('click', () => {
+  const p = state.photos[state.activeIdx];
+  if (!p) return;
+  autoFramePhoto(p);
+  syncCropControls();
+  updateCropGuide();
+});
+
+$('center-crop-btn').addEventListener('click', () => {
+  const p = state.photos[state.activeIdx];
+  if (!p) return;
+  p.crop = makeDefaultCrop();
+  syncCropControls();
+  updateCropGuide();
 });
 
 $('quality').addEventListener('input', function () {
@@ -719,115 +948,170 @@ downloadBtn.addEventListener('click', () => exportPhoto(state.activeIdx));
 downloadAllBtn.addEventListener('click', exportAll);
 
 async function exportPhoto(idx) {
+  if (idx < 0) return;
+  downloadBtn.disabled = true;
+  showProc('고화질 사진 만드는 중...', state.photos[idx]?.name || '');
+  await tick();
+  try {
+    await ensurePhotoAnalysis(idx);
+    const result = await buildPhotoBlob(idx);
+    downloadBlob(result.blob, result.filename);
+  } catch (e) {
+    console.error(e);
+    showToast('사진을 저장하지 못했습니다. 사진 크기를 줄여 다시 시도해주세요.');
+  } finally {
+    hideProc();
+    downloadBtn.disabled = false;
+  }
+}
+
+async function ensurePhotoAnalysis(idx) {
   const p = state.photos[idx];
   if (!p) return;
+  if (p.ready) {
+    if (state.selectedSize !== 'original' && p.crop.autoFramed) autoFramePhoto(p);
+    return;
+  }
 
   const img = p.image;
   const o = p.orientation || 1;
   const swap = o >= 5;
-  const oW = swap ? img.naturalHeight : img.naturalWidth;
-  const oH = swap ? img.naturalWidth  : img.naturalHeight;
-  const mp = ((oW * oH) / 1e6).toFixed(1);
-  const isLarge = oW * oH > 15e6; // > 15MP
+  const source = getImageSize(img);
+  const oW = swap ? source.h : source.w;
+  const oH = swap ? source.w : source.h;
+  const scale = Math.min(1, 900 / Math.max(oW, oH));
+  const w = Math.max(1, Math.round(oW * scale));
+  const h = Math.max(1, Math.round(oH * scale));
+  const canvas = Object.assign(document.createElement('canvas'), { width: w, height: h });
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  drawImageOriented(ctx, img, o, w, h);
+  p.autoCorr = computeAutoCorr(ctx.getImageData(0, 0, w, h));
+  p.displayW = w;
+  p.displayH = h;
+
+  if (faceApiReadyPromise) await faceApiReadyPromise;
+  if (state.faceApiLoaded) {
+    try {
+      p.faceDetections = await detectFacesForPhoto(p, w, h);
+    } catch { p.faceDetections = []; }
+  }
+  autoFramePhoto(p);
+}
+
+async function buildPhotoBlob(idx) {
+  const p = state.photos[idx];
+  if (!p) throw new Error('Photo not found');
+
+  const img = p.image;
+  const o = p.orientation || 1;
+  const swap = o >= 5;
+  const source = getImageSize(img);
+  const oW = swap ? source.h : source.w;
+  const oH = swap ? source.w : source.h;
+  const params = p.params;
 
   const fc = Object.assign(document.createElement('canvas'), { width: oW, height: oH });
   const fx = fc.getContext('2d', { willReadFrequently: true });
   drawImageOriented(fx, img, o, oW, oH);
-  if (isLarge) setProc(`고화질 처리 중 (${mp}MP)… 잠시 기다려 주세요`);
 
   // reuse autoCorr computed at display size — statistically equivalent
   const id = fx.getImageData(0, 0, oW, oH);
   const d  = id.data;
   applyAutoLevels(d, p.autoCorr.levels);
   applyWhiteBalance(d, p.autoCorr.wb);
-  applyBCS(d, state.params.brightness, state.params.contrast, state.params.saturation);
-  applyTemperature(d, state.params.temperature);
-  applyHighlightsShadows(d, state.params.highlights, state.params.shadows);
+  applyBCS(d, params.brightness, params.contrast, params.saturation);
+  applyTemperature(d, params.temperature);
+  applyHighlightsShadows(d, params.highlights, params.shadows);
   fx.putImageData(id, 0, 0);
 
-  if (state.params.noiseReduction > 0) applyNoiseReduction(fx, oW, oH, state.params.noiseReduction / 100);
-  if (state.params.clarity > 0)        applyClarity(fx, oW, oH, state.params.clarity);
-  if (state.params.sharpness > 0)      unsharpMask(fx, oW, oH, state.params.sharpness / 100);
+  if (params.noiseReduction > 0) applyNoiseReduction(fx, oW, oH, params.noiseReduction / 100);
+  if (params.clarity > 0)        applyClarity(fx, oW, oH, params.clarity);
+  if (params.sharpness > 0)      unsharpMask(fx, oW, oH, params.sharpness / 100);
 
-  if (state.params.skinSmooth > 0) {
+  if (params.skinSmooth > 0) {
     if (p.faceDetections.length > 0) {
       const sx = oW / p.displayW, sy = oH / p.displayH;
       const scaled = p.faceDetections.map(det => ({
         ...det,
         landmarks: { positions: det.landmarks.positions.map(pt => ({ x: pt.x * sx, y: pt.y * sy })) },
       }));
-      faceSmooth(fx, oW, oH, state.params.skinSmooth / 100, scaled);
+      faceSmooth(fx, oW, oH, params.skinSmooth / 100, scaled);
     } else {
-      skinToneSmooth(fx, oW, oH, (state.params.skinSmooth / 100) * 0.4);
+      skinToneSmooth(fx, oW, oH, (params.skinSmooth / 100) * 0.4);
     }
   }
 
-  const size = PRINT_SIZES[state.selectedSize];
-  const out  = size ? resizeForPrint(fc, size.w, size.h) : fc;
+  const target = getPrintTarget(p);
+  const out = target ? resizeForPrint(fc, target.w, target.h, p.crop) : fc;
 
   const fmt  = $('format-select').value;
   const qual = +$('quality').value / 100;
-  const url  = out.toDataURL(fmt === 'png' ? 'image/png' : 'image/jpeg', qual);
+  const mime = fmt === 'png' ? 'image/png' : 'image/jpeg';
+  const blob = await canvasToBlob(out, mime, qual);
   const ext  = fmt === 'png' ? 'png' : 'jpg';
   const base = p.name.replace(/\.[^.]+$/, '');
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${base}_retouched_${state.selectedSize}.${ext}`;
-  a.click();
+  return { blob, filename: `${base}_retouched_${state.selectedSize}.${ext}` };
 }
 
 async function exportAll() {
+  if (typeof JSZip === 'undefined') {
+    showToast('ZIP 기능을 불러오지 못했습니다. 인터넷 연결 후 새로고침해주세요.');
+    return;
+  }
   downloadAllBtn.disabled = true;
   const total = state.photos.length;
-  showProc(`전체 다운로드 준비 중...`, `0 / ${total}장`);
+  showProc('전체 사진 자동 처리 중...', `0 / ${total}장`);
   await tick();
+  const zip = new JSZip();
 
-  for (let i = 0; i < total; i++) {
-    setProc(`처리 중...`);
-    procSub.textContent = `${i + 1} / ${total}장 — ${state.photos[i].name}`;
-    await tick();
-
-    // Ensure this photo has been prepped
-    if (!state.photos[i].ready) {
-      const p = state.photos[i];
-      const tmpC = Object.assign(document.createElement('canvas'), {
-        width: Math.round(p.image.naturalWidth * Math.min(1, 800 / p.image.naturalWidth)),
-        height: Math.round(p.image.naturalHeight * Math.min(1, 800 / p.image.naturalWidth)),
-      });
-      const tmpX = tmpC.getContext('2d');
-      tmpX.drawImage(p.image, 0, 0, tmpC.width, tmpC.height);
-      p.autoCorr = computeAutoCorr(tmpX.getImageData(0, 0, tmpC.width, tmpC.height));
-      p.displayW = tmpC.width;
-      p.displayH = tmpC.height;
-
-      if (state.faceApiLoaded) {
-        try {
-          p.faceDetections = await faceapi
-            .detectAllFaces(tmpC, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.4 }))
-            .withFaceLandmarks();
-        } catch { p.faceDetections = []; }
-      }
-      p.ready = true;
-      thumbStrip.querySelector(`[data-idx="${i}"]`)?.classList.add('ready');
+  try {
+    for (let i = 0; i < total; i++) {
+      setProc('사진별 자동 보정 중...');
+      procSub.textContent = `${i + 1} / ${total}장 — ${state.photos[i].name}`;
+      await tick();
+      await ensurePhotoAnalysis(i);
+      const result = await buildPhotoBlob(i);
+      zip.file(result.filename, result.blob);
     }
 
-    await exportPhoto(i);
-    await new Promise(r => setTimeout(r, 400)); // brief delay between downloads
+    const blob = await zip.generateAsync(
+      { type: 'blob', compression: 'STORE' },
+      info => {
+        setProc(`ZIP 파일 만드는 중... ${Math.round(info.percent)}%`);
+        procSub.textContent = `${total}장 묶는 중`;
+      },
+    );
+    downloadBlob(blob, `AutoRetouch_${total}장_${state.selectedSize}.zip`);
+    showToast(`${total}장을 ZIP 파일로 저장했습니다.`, 'info');
+  } catch (e) {
+    console.error(e);
+    showToast('전체 사진 저장에 실패했습니다. 사진 수를 줄여 다시 시도해주세요.');
+  } finally {
+    hideProc();
+    downloadAllBtn.disabled = false;
   }
-
-  hideProc();
-  downloadAllBtn.disabled = false;
 }
 
-function resizeForPrint(canvas, tW, tH) {
-  const sAR = canvas.width / canvas.height;
-  const tAR = tW / tH;
-  let sx = 0, sy = 0, sw = canvas.width, sh = canvas.height;
-  if (sAR > tAR) { sw = sh * tAR; sx = (canvas.width - sw) / 2; }
-  else           { sh = sw / tAR; sy = (canvas.height - sh) / 2; }
+function resizeForPrint(canvas, tW, tH, crop) {
+  const { sx, sy, sw, sh } = calculateCropRect(canvas.width, canvas.height, tW, tH, crop);
   const out = Object.assign(document.createElement('canvas'), { width: tW, height: tH });
   out.getContext('2d').drawImage(canvas, sx, sy, sw, sh, 0, 0, tW, tH);
   return out;
+}
+
+function canvasToBlob(canvas, mime, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Canvas export failed')), mime, quality);
+  });
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // ── Utilities ─────────────────────────────────────────────────
@@ -880,4 +1164,4 @@ function showToast(msg, type = 'error') {
 })();
 
 // ── Boot ──────────────────────────────────────────────────────
-loadFaceApi();
+faceApiReadyPromise = loadFaceApi();
