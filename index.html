@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AutoRetouch — 자동 사진 보정</title>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
   <header>
@@ -85,11 +85,24 @@
           <div class="group-header">
             <span class="group-icon">✦</span>
             <h3>자동 보정</h3>
+            <span class="group-note">사진별 분석</span>
+          </div>
+          <div class="analysis-card" id="analysis-card">
+            <div class="analysis-title">
+              <strong id="scene-label">사진 분석 대기</strong>
+              <span id="analysis-verdict">원본 우선</span>
+            </div>
+            <p id="analysis-detail">노출과 색감을 확인한 뒤 필요한 부분만 보정합니다.</p>
           </div>
           <div class="auto-badges">
-            <span class="badge active">레벨 보정</span>
-            <span class="badge active">화이트 밸런스</span>
-            <span class="badge active">자동 선명도</span>
+            <span class="badge" id="tone-badge">노출 분석</span>
+            <span class="badge" id="wb-badge">색감 분석</span>
+            <span class="badge" id="face-light-badge">얼굴 분석</span>
+          </div>
+          <div class="slider-row auto-strength-row">
+            <label for="auto-strength">자동 강도</label>
+            <input type="range" id="auto-strength" min="0" max="100" value="70">
+            <span id="auto-strength-val">70</span>
           </div>
         </div>
 
@@ -117,13 +130,13 @@
           </div>
           <div class="slider-row">
             <label for="sharpness">선명도</label>
-            <input type="range" id="sharpness" min="0" max="100" value="30">
-            <span id="sharpness-val">30</span>
+            <input type="range" id="sharpness" min="0" max="100" value="0">
+            <span id="sharpness-val">0</span>
           </div>
           <div class="slider-row">
             <label for="skin-smooth">피부 보정</label>
-            <input type="range" id="skin-smooth" min="0" max="100" value="50">
-            <span id="skin-smooth-val">50</span>
+            <input type="range" id="skin-smooth" min="0" max="100" value="0">
+            <span id="skin-smooth-val">0</span>
           </div>
         </div>
 
@@ -236,6 +249,6 @@
 
   <script src="vendor/face-api.min.js"></script>
   <script src="vendor/jszip.min.js"></script>
-  <script src="app.js?v=2"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

@@ -11,7 +11,8 @@ const PRINT_SIZES = {
 };
 
 const DEFAULT_PARAMS = Object.freeze({
-  brightness: 0, contrast: 0, saturation: 0, sharpness: 30, skinSmooth: 50,
+  autoStrength: 70,
+  brightness: 0, contrast: 0, saturation: 0, sharpness: 0, skinSmooth: 0,
   temperature: 0, highlights: 0, shadows: 0, clarity: 0, noiseReduction: 0,
 });
 
@@ -155,9 +156,12 @@ async function loadImages(files, isFirst) {
       orientation: img.orientation || 1,
       sizeMB: img.sizeMB || 0,
       params: makeDefaultParams(),
+      paramsCustomized: false,
+      autoDefaultsApplied: false,
       crop: makeDefaultCrop(),
       autoCorr: null,
       faceDetections: [],
+      faceAdjustments: [],
       displayW: 0,
       displayH: 0,
       ready: false,
@@ -351,6 +355,7 @@ async function setActive(idx) {
         p.faceDetections = await detectFacesForPhoto(p, dW, dH);
       } catch { p.faceDetections = []; }
     }
+    finalizePhotoAnalysis(p, raw);
     autoFramePhoto(p);
     p.ready = true;
     thumbStrip.querySelector(`[data-idx="${idx}"]`)?.classList.add('ready');
@@ -358,6 +363,7 @@ async function setActive(idx) {
   }
 
   updateFaceStatus(p.faceDetections);
+  updateAnalysisUI(p);
   applyProcessing();
   updateThumbActive();
   updateSliderAfterResize();
@@ -374,6 +380,88 @@ function updateFaceStatus(dets) {
   const n = dets.length;
   faceStatusEl.textContent = n > 0 ? `얼굴 ${n}명 감지 ✓` : '얼굴 미감지 — 색조 기반 보정';
   faceStatusEl.classList.toggle('detected', n > 0);
+}
+
+function getFaceBounds(det) {
+  const pts = det.landmarks.positions;
+  const xs = pts.map(pt => pt.x), ys = pts.map(pt => pt.y);
+  return {
+    minX: Math.min(...xs), maxX: Math.max(...xs),
+    minY: Math.min(...ys), maxY: Math.max(...ys),
+  };
+}
+
+function analyzeFaceExposure(imageData, detections, globalMedian) {
+  const { data, width: W, height: H } = imageData;
+  return detections.map(det => {
+    const box = getFaceBounds(det);
+    const minX = Math.max(0, Math.floor(box.minX));
+    const maxX = Math.min(W - 1, Math.ceil(box.maxX));
+    const minY = Math.max(0, Math.floor(box.minY));
+    const maxY = Math.min(H - 1, Math.ceil(box.maxY));
+    let sum = 0, count = 0;
+    for (let y = minY; y <= maxY; y += 2) {
+      for (let x = minX; x <= maxX; x += 2) {
+        const i = (y * W + x) * 4;
+        sum += 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+        count++;
+      }
+    }
+    const average = count ? sum / count : globalMedian;
+    const target = Math.min(125, Math.max(108, globalMedian * 0.88));
+    const lift = average < target - 6 ? Math.min(32, (target - average) * 0.7) : 0;
+    return { average, lift };
+  });
+}
+
+function applySceneDefaults(p, force = false) {
+  if ((!force && p.paramsCustomized) || !p.autoCorr) return;
+  const presets = {
+    general:  { sharpness: 0, skinSmooth: 0 },
+    portrait: { sharpness: 5, skinSmooth: 12 },
+    group:    { sharpness: 5, skinSmooth: 6 },
+  };
+  Object.assign(p.params, presets[p.autoCorr.sceneType] || presets.general);
+  p.autoDefaultsApplied = true;
+}
+
+function finalizePhotoAnalysis(p, imageData) {
+  const faces = p.faceDetections.length;
+  p.autoCorr.sceneType = faces >= 3 ? 'group' : faces > 0 ? 'portrait' : 'general';
+  p.faceAdjustments = analyzeFaceExposure(imageData, p.faceDetections, p.autoCorr.stats.median);
+  p.autoCorr.backlitFaces = p.faceAdjustments.filter(item => item.lift >= 8).length;
+  applySceneDefaults(p);
+  if (state.photos[state.activeIdx] === p) {
+    state.params = p.params;
+    syncParamControls();
+  }
+}
+
+function updateAnalysisUI(p) {
+  if (!p?.autoCorr) return;
+  const corr = p.autoCorr;
+  const labels = { general: '일반 사진', portrait: '인물 사진', group: `단체사진 · ${p.faceDetections.length}명` };
+  $('scene-label').textContent = labels[corr.sceneType] || '사진 분석 완료';
+
+  const changes = [];
+  if (corr.needsTone) changes.push('노출');
+  if (corr.wbApplied) changes.push('색감');
+  if (corr.backlitFaces) changes.push(`어두운 얼굴 ${corr.backlitFaces}명`);
+  if (p.params.skinSmooth > 0) changes.push('인물 자연 보정');
+  $('analysis-verdict').textContent = changes.length ? '필요한 부분만 보정' : '원본 유지 권장';
+  $('analysis-detail').textContent = changes.length
+    ? `${changes.join(' · ')}만 자동 조정합니다.${corr.guardScale < 1 ? ' 과보정 방지가 적용됐습니다.' : ''}`
+    : '노출과 색감이 양호해 자동 보정을 최소화합니다.';
+
+  setAnalysisBadge('tone-badge', corr.needsTone, corr.needsTone ? '노출 선택 보정' : '노출 유지');
+  setAnalysisBadge('wb-badge', corr.wbApplied, corr.wbApplied ? '중립색 기준 보정' : '색감 유지');
+  setAnalysisBadge('face-light-badge', corr.backlitFaces > 0, corr.backlitFaces ? '역광 얼굴 보정' : '얼굴 밝기 유지');
+}
+
+function setAnalysisBadge(id, active, text) {
+  const el = $(id);
+  el.textContent = text;
+  el.classList.toggle('active', active);
 }
 
 // ── Thumbnail Strip ───────────────────────────────────────────
@@ -426,32 +514,83 @@ function updateCounter() {
 function computeAutoCorr(imageData) {
   const d = imageData.data;
   const n = d.length / 4;
-  const hR = new Int32Array(256), hG = new Int32Array(256), hB = new Int32Array(256);
-  let rS = 0, gS = 0, bS = 0;
+  const hY = new Int32Array(256);
+  let neutralR = 0, neutralG = 0, neutralB = 0, neutralCount = 0;
+  let clippedDark = 0, clippedBright = 0;
 
   for (let i = 0; i < d.length; i += 4) {
-    hR[d[i]]++; hG[d[i+1]]++; hB[d[i+2]]++;
-    rS += d[i]; gS += d[i+1]; bS += d[i+2];
+    const r = d[i], g = d[i+1], b = d[i+2];
+    const y = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    hY[y]++;
+    if (y <= 2) clippedDark++;
+    if (y >= 253) clippedBright++;
+
+    const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+    if (y > 35 && y < 225 && chroma < 24) {
+      neutralR += r; neutralG += g; neutralB += b; neutralCount++;
+    }
   }
 
-  const clip = n * 0.005;
-  function pct(h, lo) {
+  function percentile(p) {
+    const target = n * p;
     let s = 0;
-    for (let i = 0; i < 256; i++) { s += h[i]; if (s >= lo) return i; }
+    for (let i = 0; i < 256; i++) { s += hY[i]; if (s >= target) return i; }
     return 255;
   }
 
-  const avg = (rS + gS + bS) / (3 * n);
-  // Clamp WB shifts to ±8% — prevents yellow/blue cast on outdoor scenes with dominant sky
-  const wbClamp = (v) => Math.max(0.92, Math.min(1.08, v));
-  return {
-    levels: [
-      [pct(hR, clip), pct(hR, n - clip)],
-      [pct(hG, clip), pct(hG, n - clip)],
-      [pct(hB, clip), pct(hB, n - clip)],
-    ],
-    wb: [wbClamp(avg / (rS / n)), wbClamp(avg / (gS / n)), wbClamp(avg / (bS / n))],
+  const p05 = percentile(0.05), median = percentile(0.5), p95 = percentile(0.95), p99 = percentile(0.99);
+  let exposureEV = 0;
+  if (median < 68) exposureEV = Math.min(0.45, Math.log2(92 / Math.max(20, median)) * 0.45);
+  else if (median > 188) exposureEV = Math.max(-0.3, Math.log2(168 / median) * 0.4);
+
+  const dynamicRange = p95 - p05;
+  const shadowLift = median < 108 && p05 < 12 ? Math.min(14, (12 - p05) * 0.8) : 0;
+  const highlightCompression = p99 > 251 && clippedBright / n > 0.015 ? 0.1 : 0;
+  const contrastBoost = dynamicRange < 105 ? Math.min(0.1, (105 - dynamicRange) / 500) : 0;
+
+  let wb = [1, 1, 1], wbApplied = false;
+  if (neutralCount > n * 0.008) {
+    const nr = neutralR / neutralCount, ng = neutralG / neutralCount, nb = neutralB / neutralCount;
+    const avg = (nr + ng + nb) / 3;
+    const raw = [avg / nr, avg / ng, avg / nb];
+    const maxShift = Math.max(...raw.map(v => Math.abs(v - 1)));
+    if (maxShift > 0.012 && maxShift < 0.12) {
+      wb = raw.map(v => Math.max(0.96, Math.min(1.04, v)));
+      wbApplied = true;
+    }
+  }
+
+  const correction = {
+    exposureEV, shadowLift, highlightCompression, contrastBoost, wb, wbApplied,
+    needsTone: Math.abs(exposureEV) > 0.01 || shadowLift > 0 || highlightCompression > 0 || contrastBoost > 0,
+    stats: { p05, median, p95, p99, dynamicRange, clippedDark: clippedDark / n, clippedBright: clippedBright / n },
+    guardScale: 1,
   };
+  correction.guardScale = evaluateCorrectionSafety(d, correction);
+  return correction;
+}
+
+function transformLuminance(y, corr, strength) {
+  let next = y * Math.pow(2, corr.exposureEV * strength);
+  next += corr.shadowLift * strength * Math.pow(1 - y / 255, 2);
+  if (next > 180) next -= (next - 180) * corr.highlightCompression * strength;
+  next = 128 + (next - 128) * (1 + corr.contrastBoost * strength);
+  return Math.max(0, Math.min(255, next));
+}
+
+function evaluateCorrectionSafety(d, corr) {
+  let before = 0, after = 0, count = 0;
+  for (let i = 0; i < d.length; i += 80) {
+    const r = d[i], g = d[i+1], b = d[i+2];
+    const y = 0.299 * r + 0.587 * g + 0.114 * b;
+    const nextY = transformLuminance(y, corr, 1);
+    const ratio = y > 1 ? nextY / y : 1;
+    if (r <= 1 || g <= 1 || b <= 1 || r >= 254 || g >= 254 || b >= 254) before++;
+    const rr = r * ratio * corr.wb[0], gg = g * ratio * corr.wb[1], bb = b * ratio * corr.wb[2];
+    if (rr <= 1 || gg <= 1 || bb <= 1 || rr >= 254 || gg >= 254 || bb >= 254) after++;
+    count++;
+  }
+  return after / count > before / count + 0.005 ? 0.35 : 1;
 }
 
 // ── Processing Pipeline ───────────────────────────────────────
@@ -463,15 +602,17 @@ function applyProcessing() {
   const id = new ImageData(new Uint8ClampedArray(p.rawPixels), W, H);
   const d  = id.data;
 
-  applyAutoLevels(d, p.autoCorr.levels);
-  applyWhiteBalance(d, p.autoCorr.wb);
   const params = p.params;
+  applySmartAuto(d, p.autoCorr, params.autoStrength);
   applyBCS(d, params.brightness, params.contrast, params.saturation);
   applyTemperature(d, params.temperature);
   applyHighlightsShadows(d, params.highlights, params.shadows);
 
   ctxAfter.putImageData(id, 0, 0);
 
+  if (p.faceAdjustments.length && params.autoStrength > 0) {
+    autoFaceLight(ctxAfter, W, H, p.faceDetections, p.faceAdjustments, params.autoStrength / 100);
+  }
   if (params.noiseReduction > 0) applyNoiseReduction(ctxAfter, W, H, params.noiseReduction / 100);
   if (params.clarity > 0)        applyClarity(ctxAfter, W, H, params.clarity);
   if (params.sharpness > 0)      unsharpMask(ctxAfter, W, H, params.sharpness / 100);
@@ -480,22 +621,17 @@ function applyProcessing() {
   updateClip();
 }
 
-function applyAutoLevels(d, levels) {
+function applySmartAuto(d, corr, amount) {
+  const strength = (amount / 100) * corr.guardScale;
+  if (strength <= 0) return;
   for (let i = 0; i < d.length; i += 4) {
-    for (let c = 0; c < 3; c++) {
-      const [lo, hi] = levels[c];
-      const rng = hi - lo;
-      if (rng > 0) d[i+c] = clamp(Math.round(((d[i+c] - lo) / rng) * 255));
-    }
-  }
-}
-
-function applyWhiteBalance(d, wb) {
-  const [rS, gS, bS] = wb;
-  for (let i = 0; i < d.length; i += 4) {
-    d[i]   = clamp(d[i]   * rS);
-    d[i+1] = clamp(d[i+1] * gS);
-    d[i+2] = clamp(d[i+2] * bS);
+    const r = d[i], g = d[i+1], b = d[i+2];
+    const y = 0.299 * r + 0.587 * g + 0.114 * b;
+    const nextY = transformLuminance(y, corr, strength);
+    const ratio = y > 1 ? nextY / y : 1;
+    d[i]   = clamp(r * ratio * (1 + (corr.wb[0] - 1) * strength));
+    d[i+1] = clamp(g * ratio * (1 + (corr.wb[1] - 1) * strength));
+    d[i+2] = clamp(b * ratio * (1 + (corr.wb[2] - 1) * strength));
   }
 }
 
@@ -604,10 +740,47 @@ function unsharpMask(ctx, W, H, amount) {
   ctx.putImageData(orig, 0, 0);
 }
 
+// ── Selective face exposure (backlit portraits / groups) ─────
+function autoFaceLight(ctx, W, H, detections, adjustments, strength) {
+  if (!detections.length || strength <= 0) return;
+  const image = ctx.getImageData(0, 0, W, H);
+  const d = image.data;
+
+  detections.forEach((det, index) => {
+    const lift = (adjustments[index]?.lift || 0) * strength;
+    if (lift < 1) return;
+    const box = getFaceBounds(det);
+    const faceW = Math.max(1, box.maxX - box.minX);
+    const faceH = Math.max(1, box.maxY - box.minY);
+    const cx = (box.minX + box.maxX) / 2;
+    const cy = (box.minY + box.maxY) / 2 - faceH * 0.04;
+    const rx = faceW * 0.62, ry = faceH * 0.72;
+    const minX = Math.max(0, Math.floor(cx - rx));
+    const maxX = Math.min(W - 1, Math.ceil(cx + rx));
+    const minY = Math.max(0, Math.floor(cy - ry));
+    const maxY = Math.min(H - 1, Math.ceil(cy + ry));
+
+    for (let y = minY; y <= maxY; y++) {
+      const ny = (y - cy) / ry;
+      for (let x = minX; x <= maxX; x++) {
+        const nx = (x - cx) / rx;
+        const distance = nx * nx + ny * ny;
+        if (distance >= 1) continue;
+        const weight = Math.pow(1 - distance, 1.7);
+        const delta = lift * weight;
+        const i = (y * W + x) * 4;
+        d[i] = clamp(d[i] + delta);
+        d[i+1] = clamp(d[i+1] + delta);
+        d[i+2] = clamp(d[i+2] + delta);
+      }
+    }
+  });
+  ctx.putImageData(image, 0, 0);
+}
+
 // ── Skin Smoothing ────────────────────────────────────────────
 function skinSmooth(ctx, W, H, amount, detections) {
   if (detections.length > 0) faceSmooth(ctx, W, H, amount, detections);
-  else skinToneSmooth(ctx, W, H, amount * 0.4);
 }
 
 function faceSmooth(ctx, W, H, amount, detections) {
@@ -662,23 +835,6 @@ function eraseRegion(ctx, pts) {
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
   ctx.closePath();
   ctx.fill();
-}
-
-function skinToneSmooth(ctx, W, H, amount) {
-  const id = ctx.getImageData(0, 0, W, H);
-  const d  = id.data;
-  const bl = new ImageData(new Uint8ClampedArray(d), W, H);
-  boxBlur(bl, 3);
-  const b = bl.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const r = d[i], g = d[i+1], bv = d[i+2];
-    if (r > 95 && g > 40 && bv > 20 && r > g && r > bv && r - Math.min(g, bv) > 15) {
-      d[i]   = d[i]   * (1 - amount) + b[i]   * amount;
-      d[i+1] = d[i+1] * (1 - amount) + b[i+1] * amount;
-      d[i+2] = d[i+2] * (1 - amount) + b[i+2] * amount;
-    }
-  }
-  ctx.putImageData(id, 0, 0);
 }
 
 // ── Box Blur (sliding-window O(n), not O(n·r)) ────────────────
@@ -861,6 +1017,7 @@ function syncParamControls() {
 
 // ── Controls ──────────────────────────────────────────────────
 const PARAM_MAP = {
+  'auto-strength': 'autoStrength',
   'brightness': 'brightness', 'contrast': 'contrast', 'saturation': 'saturation',
   'sharpness': 'sharpness',   'skin-smooth': 'skinSmooth',
   'temperature': 'temperature', 'highlights': 'highlights', 'shadows': 'shadows',
@@ -875,6 +1032,8 @@ for (const id of Object.keys(PARAM_MAP)) {
   input.addEventListener('input', () => {
     valEl.textContent = input.value;
     state.params[PARAM_MAP[id]] = +input.value;
+    const current = state.photos[state.activeIdx];
+    if (current) current.paramsCustomized = true;
     clearTimeout(debounce);
     debounce = setTimeout(applyProcessing, HEAVY_PARAMS.has(id) ? 150 : 80);
   });
@@ -884,6 +1043,7 @@ $('apply-all-btn').addEventListener('click', () => {
   const current = state.photos[state.activeIdx];
   if (!current) return;
   state.photos.forEach(p => { p.params = { ...current.params }; });
+  state.photos.forEach(p => { p.paramsCustomized = true; });
   state.params = current.params;
   showToast(`${state.photos.length}장에 현재 보정 설정을 적용했습니다.`, 'info');
 });
@@ -892,6 +1052,8 @@ $('reset-photo-btn').addEventListener('click', () => {
   const current = state.photos[state.activeIdx];
   if (!current) return;
   current.params = makeDefaultParams();
+  current.paramsCustomized = false;
+  applySceneDefaults(current, true);
   state.params = current.params;
   syncParamControls();
   applyProcessing();
@@ -985,7 +1147,8 @@ async function ensurePhotoAnalysis(idx) {
   const canvas = Object.assign(document.createElement('canvas'), { width: w, height: h });
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   drawImageOriented(ctx, img, o, w, h);
-  p.autoCorr = computeAutoCorr(ctx.getImageData(0, 0, w, h));
+  const analysisData = ctx.getImageData(0, 0, w, h);
+  p.autoCorr = computeAutoCorr(analysisData);
   p.displayW = w;
   p.displayH = h;
 
@@ -995,6 +1158,7 @@ async function ensurePhotoAnalysis(idx) {
       p.faceDetections = await detectFacesForPhoto(p, w, h);
     } catch { p.faceDetections = []; }
   }
+  finalizePhotoAnalysis(p, analysisData);
   autoFramePhoto(p);
 }
 
@@ -1017,28 +1181,31 @@ async function buildPhotoBlob(idx) {
   // reuse autoCorr computed at display size — statistically equivalent
   const id = fx.getImageData(0, 0, oW, oH);
   const d  = id.data;
-  applyAutoLevels(d, p.autoCorr.levels);
-  applyWhiteBalance(d, p.autoCorr.wb);
+  applySmartAuto(d, p.autoCorr, params.autoStrength);
   applyBCS(d, params.brightness, params.contrast, params.saturation);
   applyTemperature(d, params.temperature);
   applyHighlightsShadows(d, params.highlights, params.shadows);
   fx.putImageData(id, 0, 0);
+
+  let scaledDetections = [];
+  if (p.faceDetections.length > 0) {
+    const sx = oW / p.displayW, sy = oH / p.displayH;
+    scaledDetections = p.faceDetections.map(det => ({
+      ...det,
+      landmarks: { positions: det.landmarks.positions.map(pt => ({ x: pt.x * sx, y: pt.y * sy })) },
+    }));
+  }
+
+  if (scaledDetections.length && params.autoStrength > 0) {
+    autoFaceLight(fx, oW, oH, scaledDetections, p.faceAdjustments, params.autoStrength / 100);
+  }
 
   if (params.noiseReduction > 0) applyNoiseReduction(fx, oW, oH, params.noiseReduction / 100);
   if (params.clarity > 0)        applyClarity(fx, oW, oH, params.clarity);
   if (params.sharpness > 0)      unsharpMask(fx, oW, oH, params.sharpness / 100);
 
   if (params.skinSmooth > 0) {
-    if (p.faceDetections.length > 0) {
-      const sx = oW / p.displayW, sy = oH / p.displayH;
-      const scaled = p.faceDetections.map(det => ({
-        ...det,
-        landmarks: { positions: det.landmarks.positions.map(pt => ({ x: pt.x * sx, y: pt.y * sy })) },
-      }));
-      faceSmooth(fx, oW, oH, params.skinSmooth / 100, scaled);
-    } else {
-      skinToneSmooth(fx, oW, oH, (params.skinSmooth / 100) * 0.4);
-    }
+    if (scaledDetections.length) faceSmooth(fx, oW, oH, params.skinSmooth / 100, scaledDetections);
   }
 
   const target = getPrintTarget(p);

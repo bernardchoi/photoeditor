@@ -436,6 +436,26 @@ header p {
   margin-top: -0.25rem;
 }
 
+.analysis-card {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--surface2), rgba(123, 110, 246, 0.08));
+}
+
+.analysis-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.analysis-title strong { font-size: 0.9rem; }
+.analysis-title span { color: var(--green); font-size: 0.72rem; font-weight: 700; }
+#analysis-detail { color: var(--text-muted); font-size: 0.76rem; line-height: 1.45; }
+.auto-strength-row { grid-template-columns: 80px 1fr 36px; margin-top: 0.15rem; }
+
 .setting-actions,
 .crop-actions {
   display: flex;
