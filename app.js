@@ -275,6 +275,7 @@ async function setActive(idx) {
   if (!p.ready) {
     showProc(`사진 ${idx + 1}/${state.photos.length} 분석 중...`, p.name);
     const raw = ctxBefore.getImageData(0, 0, dW, dH);
+    p.rawPixels = new Uint8ClampedArray(raw.data); // cache for applyProcessing
     p.autoCorr = computeAutoCorr(raw);
 
     if (state.faceApiLoaded) {
@@ -385,7 +386,8 @@ function applyProcessing() {
   const p = state.photos[state.activeIdx];
   if (!p) return;
   const { displayW: W, displayH: H } = p;
-  const id = ctxBefore.getImageData(0, 0, W, H);
+  // use cached raw pixels — avoids GPU→CPU readback on every slider move
+  const id = new ImageData(new Uint8ClampedArray(p.rawPixels), W, H);
   const d  = id.data;
 
   applyAutoLevels(d, p.autoCorr.levels);
@@ -455,16 +457,15 @@ function applyHighlightsShadows(d, highlights, shadows) {
   if (!highlights && !shadows) return;
   const hf = highlights / 100, sf = shadows / 100;
   for (let i = 0; i < d.length; i += 4) {
-    for (let c = 0; c < 3; c++) {
-      const v = d[i + c] / 255;
-      // highlight weight: high luminance pixels
-      const hw = v * v;
-      // shadow weight: low luminance pixels
-      const sw = (1 - v) * (1 - v);
-      const nv = v + hf * hw * (1 - v) - hf * hw * v * 0.5
-                   + sf * sw * (1 - v) * 0.8;
-      d[i + c] = clamp(Math.round(nv * 255));
-    }
+    // compute luminance once, share weight across all 3 channels
+    const lum = (0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]) / 255;
+    const hw = lum * lum;
+    const sw = (1 - lum) * (1 - lum);
+    const delta = (hf * hw * (1 - lum) - hf * hw * lum * 0.5
+                 + sf * sw * (1 - lum) * 0.8) * 255;
+    d[i]   = clamp(d[i]   + delta);
+    d[i+1] = clamp(d[i+1] + delta);
+    d[i+2] = clamp(d[i+2] + delta);
   }
 }
 
@@ -473,9 +474,9 @@ function applyClarity(ctx, W, H, amount) {
   if (!amount) return;
   const orig = ctx.getImageData(0, 0, W, H);
   const blur = new ImageData(new Uint8ClampedArray(orig.data), W, H);
-  // large radius blur for local contrast
-  const r = Math.max(4, Math.round(W / 80));
-  boxBlur(blur, r); boxBlur(blur, r); boxBlur(blur, r);
+  // single larger radius approximates 3× small-radius box blur (gaussian approx)
+  const r = Math.max(6, Math.round(W / 50));
+  boxBlur(blur, r);
   const d = orig.data, b = blur.data;
   const str = (amount / 100) * 0.7;
   for (let i = 0; i < d.length; i += 4) {
@@ -606,33 +607,44 @@ function skinToneSmooth(ctx, W, H, amount) {
   ctx.putImageData(id, 0, 0);
 }
 
-// ── Box Blur ──────────────────────────────────────────────────
+// ── Box Blur (sliding-window O(n), not O(n·r)) ────────────────
 function boxBlur(imageData, radius) {
   const { data: d, width: W, height: H } = imageData;
-  const tmp = new Uint8ClampedArray(d);
+  const tmp = new Uint8ClampedArray(d.length);
+  const diam = radius * 2 + 1;
+
+  // horizontal pass: src=d → tmp
   for (let y = 0; y < H; y++) {
+    const row = y * W;
+    let rS = 0, gS = 0, bS = 0;
+    // seed the window on the left edge
+    for (let dx = -radius; dx <= radius; dx++) {
+      const k = (row + Math.max(0, Math.min(W - 1, dx))) * 4;
+      rS += d[k]; gS += d[k+1]; bS += d[k+2];
+    }
     for (let x = 0; x < W; x++) {
-      let r = 0, g = 0, b = 0, n = 0;
-      for (let dx = -radius; dx <= radius; dx++) {
-        const nx = Math.max(0, Math.min(W - 1, x + dx));
-        const k = (y * W + nx) * 4;
-        r += tmp[k]; g += tmp[k+1]; b += tmp[k+2]; n++;
-      }
-      const k = (y * W + x) * 4;
-      d[k] = r/n; d[k+1] = g/n; d[k+2] = b/n;
+      const k = (row + x) * 4;
+      tmp[k] = rS / diam; tmp[k+1] = gS / diam; tmp[k+2] = bS / diam; tmp[k+3] = d[k+3];
+      // slide: remove left edge, add right edge
+      const outK = (row + Math.max(0, x - radius)) * 4;
+      const inK  = (row + Math.min(W - 1, x + radius + 1)) * 4;
+      rS += d[inK] - d[outK]; gS += d[inK+1] - d[outK+1]; bS += d[inK+2] - d[outK+2];
     }
   }
-  tmp.set(d);
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      let r = 0, g = 0, b = 0, n = 0;
-      for (let dy = -radius; dy <= radius; dy++) {
-        const ny = Math.max(0, Math.min(H - 1, y + dy));
-        const k = (ny * W + x) * 4;
-        r += tmp[k]; g += tmp[k+1]; b += tmp[k+2]; n++;
-      }
+
+  // vertical pass: src=tmp → d
+  for (let x = 0; x < W; x++) {
+    let rS = 0, gS = 0, bS = 0;
+    for (let dy = -radius; dy <= radius; dy++) {
+      const k = (Math.max(0, Math.min(H - 1, dy)) * W + x) * 4;
+      rS += tmp[k]; gS += tmp[k+1]; bS += tmp[k+2];
+    }
+    for (let y = 0; y < H; y++) {
       const k = (y * W + x) * 4;
-      d[k] = r/n; d[k+1] = g/n; d[k+2] = b/n;
+      d[k] = rS / diam; d[k+1] = gS / diam; d[k+2] = bS / diam;
+      const outK = (Math.max(0, y - radius) * W + x) * 4;
+      const inK  = (Math.min(H - 1, y + radius + 1) * W + x) * 4;
+      rS += tmp[inK] - tmp[outK]; gS += tmp[inK+1] - tmp[outK+1]; bS += tmp[inK+2] - tmp[outK+2];
     }
   }
 }
@@ -677,6 +689,7 @@ const PARAM_MAP = {
   'clarity': 'clarity', 'noise-reduction': 'noiseReduction',
 };
 
+const HEAVY_PARAMS = new Set(['clarity', 'noise-reduction']);
 let debounce = null;
 for (const id of Object.keys(PARAM_MAP)) {
   const input = $(id);
@@ -685,7 +698,7 @@ for (const id of Object.keys(PARAM_MAP)) {
     valEl.textContent = input.value;
     state.params[PARAM_MAP[id]] = +input.value;
     clearTimeout(debounce);
-    debounce = setTimeout(applyProcessing, 80);
+    debounce = setTimeout(applyProcessing, HEAVY_PARAMS.has(id) ? 150 : 80);
   });
 }
 
@@ -722,13 +735,11 @@ async function exportPhoto(idx) {
   drawImageOriented(fx, img, o, oW, oH);
   if (isLarge) setProc(`고화질 처리 중 (${mp}MP)… 잠시 기다려 주세요`);
 
-  // Recompute auto correction at full resolution
-  const fullAutoCorr = computeAutoCorr(fx.getImageData(0, 0, oW, oH));
-
+  // reuse autoCorr computed at display size — statistically equivalent
   const id = fx.getImageData(0, 0, oW, oH);
   const d  = id.data;
-  applyAutoLevels(d, fullAutoCorr.levels);
-  applyWhiteBalance(d, fullAutoCorr.wb);
+  applyAutoLevels(d, p.autoCorr.levels);
+  applyWhiteBalance(d, p.autoCorr.wb);
   applyBCS(d, state.params.brightness, state.params.contrast, state.params.saturation);
   applyTemperature(d, state.params.temperature);
   applyHighlightsShadows(d, state.params.highlights, state.params.shadows);
