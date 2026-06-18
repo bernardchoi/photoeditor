@@ -15,6 +15,9 @@
         <p>자동 보정 · 피부 보정 · 인화용 다운로드</p>
       </div>
     </div>
+    <div class="header-right">
+      <span id="photo-counter" class="photo-counter hidden"></span>
+    </div>
   </header>
 
   <main>
@@ -23,9 +26,9 @@
       <div class="upload-content" id="upload-content">
         <div class="upload-icon">↑</div>
         <p class="upload-title">사진을 드래그하거나 클릭해서 업로드</p>
-        <p class="upload-hint">JPG · PNG · WEBP 지원 · 원본 해상도 유지</p>
+        <p class="upload-hint">JPG · PNG · WEBP 지원 · 여러 장 동시 업로드 가능</p>
         <button class="btn-primary" id="upload-btn">파일 선택</button>
-        <input type="file" id="file-input" accept="image/*" hidden>
+        <input type="file" id="file-input" accept="image/*" multiple hidden>
       </div>
     </section>
 
@@ -35,24 +38,31 @@
       <div id="processing-overlay" class="processing-overlay hidden">
         <div class="spinner"></div>
         <p id="processing-text">사진 분석 중...</p>
+        <p id="processing-sub" class="processing-sub"></p>
       </div>
 
-      <!-- Comparison View -->
-      <div class="comparison-container">
-        <div class="comparison-wrapper" id="comparison-wrapper">
-          <canvas id="canvas-before"></canvas>
-          <canvas id="canvas-after"></canvas>
-          <div class="comparison-slider" id="comparison-slider">
-            <div class="slider-line"></div>
-            <div class="slider-handle">
-              <span>◁</span><span>▷</span>
+      <!-- Left: Comparison + Thumbnail Strip -->
+      <div class="editor-left">
+        <!-- Comparison View -->
+        <div class="comparison-container">
+          <div class="comparison-wrapper" id="comparison-wrapper">
+            <canvas id="canvas-before"></canvas>
+            <canvas id="canvas-after"></canvas>
+            <div class="comparison-slider" id="comparison-slider">
+              <div class="slider-line"></div>
+              <div class="slider-handle">
+                <span>◁</span><span>▷</span>
+              </div>
+            </div>
+            <div class="comparison-labels">
+              <span>원본</span>
+              <span>보정</span>
             </div>
           </div>
-          <div class="comparison-labels">
-            <span>원본</span>
-            <span>보정</span>
-          </div>
         </div>
+
+        <!-- Thumbnail Strip -->
+        <div class="thumb-strip" id="thumb-strip"></div>
       </div>
 
       <!-- Controls -->
@@ -78,6 +88,7 @@
           <div class="group-header">
             <span class="group-icon">◎</span>
             <h3>세부 조정</h3>
+            <span class="group-note">전체 사진 적용</span>
           </div>
           <div class="slider-row">
             <label>밝기</label>
@@ -134,10 +145,15 @@
               <input type="range" id="quality" min="60" max="100" value="95">
             </div>
           </div>
-          <button class="btn-download" id="download-btn">다운로드</button>
+          <button class="btn-download" id="download-btn">현재 사진 다운로드</button>
+          <button class="btn-download-all hidden" id="download-all-btn">전체 다운로드 (<span id="total-count">0</span>장)</button>
         </div>
 
-        <button class="btn-reset" id="reset-btn">새 사진 업로드</button>
+        <div class="bottom-actions">
+          <button class="btn-add" id="add-btn">+ 사진 추가</button>
+          <input type="file" id="add-input" accept="image/*" multiple hidden>
+          <button class="btn-reset" id="reset-btn">처음부터</button>
+        </div>
       </aside>
     </section>
   </main>
