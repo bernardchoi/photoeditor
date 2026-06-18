@@ -26,6 +26,7 @@ const state = {
   faceApiLoaded: false,
   selectedSize: 'original',
   sliderPos: 0.5,
+  reviewFilter: 'all',
   params: makeDefaultParams(),
 };
 let faceApiReadyPromise = null;
@@ -103,12 +104,14 @@ $('reset-btn').addEventListener('click', () => {
   });
   state.photos = [];
   state.activeIdx = -1;
+  state.reviewFilter = 'all';
   state.params = makeDefaultParams();
   editor.classList.add('hidden');
   uploadZone.style.display = '';
   fileInput.value = '';
   thumbStrip.innerHTML = '';
   photoCounter.classList.add('hidden');
+  document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.filter === 'all'));
 });
 
 // ── RAW / unsupported format detection ───────────────────────
@@ -158,10 +161,14 @@ async function loadImages(files, isFirst) {
       params: makeDefaultParams(),
       paramsCustomized: false,
       autoDefaultsApplied: false,
+      environmentOverride: 'auto',
       crop: makeDefaultCrop(),
       autoCorr: null,
       faceDetections: [],
       faceAdjustments: [],
+      workflow: null,
+      reviewApproved: false,
+      eventGroup: null,
       displayW: 0,
       displayH: 0,
       ready: false,
@@ -173,6 +180,7 @@ async function loadImages(files, isFirst) {
 
   // Switch to first new photo
   await setActive(start);
+  await analyzeEventPhotos(start);
   hideProc();
 }
 
@@ -209,6 +217,221 @@ function getImageSize(img) {
     w: img.naturalWidth || img.width,
     h: img.naturalHeight || img.height,
   };
+}
+
+function makeAnalysisFrame(p, maxSide = 720) {
+  const source = getImageSize(p.image);
+  const swap = (p.orientation || 1) >= 5;
+  const naturalW = swap ? source.h : source.w;
+  const naturalH = swap ? source.w : source.h;
+  const scale = Math.min(1, maxSide / Math.max(naturalW, naturalH));
+  const width = Math.max(1, Math.round(naturalW * scale));
+  const height = Math.max(1, Math.round(naturalH * scale));
+  const canvas = Object.assign(document.createElement('canvas'), { width, height });
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  drawImageOriented(ctx, p.image, p.orientation, width, height);
+  return { canvas, imageData: ctx.getImageData(0, 0, width, height) };
+}
+
+function analyzePhotoQuality(imageData) {
+  const { data, width: W, height: H } = imageData;
+  let focusSum = 0, focusSq = 0, focusCount = 0;
+  let rSum = 0, gSum = 0, bSum = 0, colorCount = 0;
+  const gray = (x, y) => {
+    const i = (y * W + x) * 4;
+    return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  };
+  for (let y = 2; y < H - 2; y += 3) {
+    for (let x = 2; x < W - 2; x += 3) {
+      const lap = 4 * gray(x, y) - gray(x - 1, y) - gray(x + 1, y) - gray(x, y - 1) - gray(x, y + 1);
+      focusSum += lap;
+      focusSq += lap * lap;
+      focusCount++;
+      const i = (y * W + x) * 4;
+      rSum += data[i]; gSum += data[i + 1]; bSum += data[i + 2]; colorCount++;
+    }
+  }
+  const focusMean = focusCount ? focusSum / focusCount : 0;
+  const focusScore = focusCount ? Math.sqrt(Math.max(0, focusSq / focusCount - focusMean * focusMean)) : 0;
+  return {
+    focusScore,
+    avgColor: colorCount ? [rSum / colorCount, gSum / colorCount, bSum / colorCount] : [128, 128, 128],
+  };
+}
+
+function createDifferenceHash(imageData) {
+  const sample = Object.assign(document.createElement('canvas'), { width: 9, height: 8 });
+  const source = Object.assign(document.createElement('canvas'), { width: imageData.width, height: imageData.height });
+  source.getContext('2d').putImageData(imageData, 0, 0);
+  const ctx = sample.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, 9, 8);
+  const d = ctx.getImageData(0, 0, 9, 8).data;
+  let hash = '';
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) {
+      const a = (y * 9 + x) * 4, b = a + 4;
+      const ya = 0.299 * d[a] + 0.587 * d[a + 1] + 0.114 * d[a + 2];
+      const yb = 0.299 * d[b] + 0.587 * d[b + 1] + 0.114 * d[b + 2];
+      hash += ya > yb ? '1' : '0';
+    }
+  }
+  return hash;
+}
+
+function hashDistance(a, b) {
+  if (!a || !b || a.length !== b.length) return Infinity;
+  let distance = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) distance++;
+  return distance;
+}
+
+function pointDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function eyeAspectRatio(points) {
+  if (!points || points.length < 6) return 1;
+  return (pointDistance(points[1], points[5]) + pointDistance(points[2], points[4]))
+    / Math.max(1, 2 * pointDistance(points[0], points[3]));
+}
+
+function inspectFaceLandmarks(detections, width, height) {
+  let closedEyes = 0, edgeFaces = 0;
+  detections.forEach(det => {
+    const points = det.landmarks?.positions || [];
+    if (points.length >= 68) {
+      const eyeScore = (eyeAspectRatio(points.slice(36, 42)) + eyeAspectRatio(points.slice(42, 48))) / 2;
+      if (eyeScore < 0.18) closedEyes++;
+    }
+    const box = det.detection?.box;
+    if (box && (box.x < width * 0.015 || box.y < height * 0.015
+      || box.x + box.width > width * 0.985 || box.y + box.height > height * 0.985)) edgeFaces++;
+  });
+  return { closedEyes, edgeFaces };
+}
+
+async function analyzeEventPhotos(start = 0) {
+  if (!state.photos.length) return;
+  showProc('행사 사진 자동 정리 중...', '초점 · 노출 · 중복 · 촬영 묶음 확인');
+  if (faceApiReadyPromise) await faceApiReadyPromise;
+
+  for (let i = start; i < state.photos.length; i++) {
+    const p = state.photos[i];
+    setProc(`사진 ${i + 1}/${state.photos.length} 자동 검수 중...`);
+    procSub.textContent = p.name;
+    await tick();
+    const frame = makeAnalysisFrame(p);
+    const corr = computeAutoCorr(frame.imageData, p.environmentOverride);
+    const quality = analyzePhotoQuality(frame.imageData);
+    let workflowDetections = p.ready ? p.faceDetections : [];
+    if (!p.ready && state.faceApiLoaded) {
+      try {
+        workflowDetections = await faceapi.detectAllFaces(
+          frame.canvas,
+          new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 }),
+        ).withFaceLandmarks();
+      } catch { workflowDetections = []; }
+    }
+    const faceCount = workflowDetections.length;
+    const faceChecks = inspectFaceLandmarks(
+      workflowDetections,
+      p.ready ? p.displayW : frame.imageData.width,
+      p.ready ? p.displayH : frame.imageData.height,
+    );
+    const issues = [];
+    if (quality.focusScore < 8) issues.push('초점이 흐릴 수 있음');
+    if (corr.stats.median < 48) issues.push('사진이 많이 어두움');
+    if (corr.stats.median > 208) issues.push('사진이 너무 밝음');
+    if (corr.stats.clippedBright > 0.035) issues.push('밝은 부분 손실');
+    if (corr.stats.clippedDark > 0.055) issues.push('어두운 부분 손실');
+    if (faceChecks.closedEyes > 0) issues.push(`눈 감은 얼굴 ${faceChecks.closedEyes}명`);
+    if (faceChecks.edgeFaces > 0) issues.push('가장자리 얼굴 잘림 확인');
+    p.workflow = {
+      ...quality,
+      corr,
+      faceCount,
+      hash: createDifferenceHash(frame.imageData),
+      aspect: frame.imageData.width / frame.imageData.height,
+      issues,
+      duplicateOf: null,
+    };
+  }
+
+  classifyDuplicatesAndGroups();
+  syncEventGroupCorrections();
+  state.photos.forEach(p => {
+    if (!p.ready || !p.rawPixels) return;
+    const raw = new ImageData(new Uint8ClampedArray(p.rawPixels), p.displayW, p.displayH);
+    p.autoCorr = computeAutoCorr(raw, p.environmentOverride);
+    applyGroupConsistency(p);
+    finalizePhotoAnalysis(p, raw);
+  });
+  renderThumbs();
+  updateWorkflowUI();
+  const active = state.photos[state.activeIdx];
+  if (active?.autoCorr) {
+    updateReviewUI(active);
+    updateAnalysisUI(active);
+    applyProcessing();
+  }
+  hideProc();
+}
+
+function classifyDuplicatesAndGroups() {
+  let group = 1;
+  let previous = null;
+  state.photos.forEach((p, i) => {
+    const w = p.workflow;
+    if (!w) return;
+    for (let j = 0; j < i; j++) {
+      const other = state.photos[j].workflow;
+      if (!other || Math.abs(other.aspect - w.aspect) > 0.08) continue;
+      if (hashDistance(other.hash, w.hash) <= 5) {
+        w.duplicateOf = j;
+        w.issues.push(`${j + 1}번과 유사한 사진`);
+        break;
+      }
+    }
+    if (previous) {
+      const colorDistance = Math.sqrt(w.avgColor.reduce((sum, value, c) => sum + Math.pow(value - previous.avgColor[c], 2), 0));
+      const sameEnvironment = w.corr.environment === previous.corr.environment;
+      const samePeopleType = (w.faceCount >= 3) === (previous.faceCount >= 3);
+      if (!sameEnvironment || !samePeopleType || colorDistance > 48) group++;
+    }
+    p.eventGroup = group;
+    previous = w;
+  });
+}
+
+function syncEventGroupCorrections() {
+  const groups = new Map();
+  state.photos.forEach(p => {
+    if (!p.workflow) return;
+    if (!groups.has(p.eventGroup)) groups.set(p.eventGroup, []);
+    groups.get(p.eventGroup).push(p.workflow.corr);
+  });
+  groups.forEach((items, id) => {
+    const avg = key => items.reduce((sum, item) => sum + item[key], 0) / items.length;
+    const target = {
+      exposureEV: avg('exposureEV'),
+      shadowLift: avg('shadowLift'),
+      highlightCompression: avg('highlightCompression'),
+      wb: [0, 1, 2].map(channel => items.reduce((sum, item) => sum + item.wb[channel], 0) / items.length),
+    };
+    state.photos.filter(p => p.eventGroup === id).forEach(p => { p.groupTarget = target; });
+  });
+}
+
+function applyGroupConsistency(p) {
+  if (!p?.autoCorr || !p.groupTarget) return;
+  const blend = 0.45;
+  const target = p.groupTarget;
+  for (const key of ['exposureEV', 'shadowLift', 'highlightCompression']) {
+    p.autoCorr[key] = p.autoCorr[key] * (1 - blend) + target[key] * blend;
+  }
+  p.autoCorr.wb = p.autoCorr.wb.map((value, i) => value * (1 - blend) + target.wb[i] * blend);
+  p.autoCorr.needsTone = Math.abs(p.autoCorr.exposureEV) > 0.01 || p.autoCorr.shadowLift > 0
+    || p.autoCorr.highlightCompression > 0 || p.autoCorr.contrastBoost > 0;
 }
 
 // Read JPEG EXIF orientation tag (no external library needed)
@@ -346,7 +569,8 @@ async function setActive(idx) {
     showProc(`사진 ${idx + 1}/${state.photos.length} 분석 중...`, p.name);
     const raw = ctxBefore.getImageData(0, 0, dW, dH);
     p.rawPixels = new Uint8ClampedArray(raw.data); // cache for applyProcessing
-    p.autoCorr = computeAutoCorr(raw);
+    p.autoCorr = computeAutoCorr(raw, p.environmentOverride);
+    applyGroupConsistency(p);
 
     if (faceApiReadyPromise) await faceApiReadyPromise;
     if (state.faceApiLoaded) {
@@ -363,6 +587,7 @@ async function setActive(idx) {
   }
 
   updateFaceStatus(p.faceDetections);
+  updateReviewUI(p);
   updateAnalysisUI(p);
   applyProcessing();
   updateThumbActive();
@@ -391,7 +616,7 @@ function getFaceBounds(det) {
   };
 }
 
-function analyzeFaceExposure(imageData, detections, globalMedian) {
+function analyzeFaceExposure(imageData, detections, globalMedian, environment) {
   const { data, width: W, height: H } = imageData;
   return detections.map(det => {
     const box = getFaceBounds(det);
@@ -408,7 +633,8 @@ function analyzeFaceExposure(imageData, detections, globalMedian) {
       }
     }
     const average = count ? sum / count : globalMedian;
-    const target = Math.min(125, Math.max(108, globalMedian * 0.88));
+    const environmentLift = environment === 'indoor' ? 5 : 0;
+    const target = Math.min(130, Math.max(108, globalMedian * 0.88) + environmentLift);
     const lift = average < target - 6 ? Math.min(32, (target - average) * 0.7) : 0;
     return { average, lift };
   });
@@ -428,7 +654,9 @@ function applySceneDefaults(p, force = false) {
 function finalizePhotoAnalysis(p, imageData) {
   const faces = p.faceDetections.length;
   p.autoCorr.sceneType = faces >= 3 ? 'group' : faces > 0 ? 'portrait' : 'general';
-  p.faceAdjustments = analyzeFaceExposure(imageData, p.faceDetections, p.autoCorr.stats.median);
+  p.faceAdjustments = analyzeFaceExposure(
+    imageData, p.faceDetections, p.autoCorr.stats.median, p.autoCorr.environment,
+  );
   p.autoCorr.backlitFaces = p.faceAdjustments.filter(item => item.lift >= 8).length;
   applySceneDefaults(p);
   if (state.photos[state.activeIdx] === p) {
@@ -441,11 +669,15 @@ function updateAnalysisUI(p) {
   if (!p?.autoCorr) return;
   const corr = p.autoCorr;
   const labels = { general: '일반 사진', portrait: '인물 사진', group: `단체사진 · ${p.faceDetections.length}명` };
-  $('scene-label').textContent = labels[corr.sceneType] || '사진 분석 완료';
+  const environments = { indoor: '실내', outdoor: '실외', unknown: '환경 불확실' };
+  $('scene-label').textContent = `${environments[corr.environment]} · ${labels[corr.sceneType] || '사진'}`;
+  $('environment-select').value = p.environmentOverride;
 
   const changes = [];
   if (corr.needsTone) changes.push('노출');
-  if (corr.wbApplied) changes.push('색감');
+  if (corr.wbApplied) changes.push(corr.environment === 'indoor' ? '실내 조명색' : '색감');
+  if (corr.autoNoiseReduction > 0) changes.push('실내 노이즈');
+  if (corr.environment === 'outdoor' && corr.highlightCompression > 0) changes.push('실외 하이라이트');
   if (corr.backlitFaces) changes.push(`어두운 얼굴 ${corr.backlitFaces}명`);
   if (p.params.skinSmooth > 0) changes.push('인물 자연 보정');
   $('analysis-verdict').textContent = changes.length ? '필요한 부분만 보정' : '원본 유지 권장';
@@ -456,6 +688,10 @@ function updateAnalysisUI(p) {
   setAnalysisBadge('tone-badge', corr.needsTone, corr.needsTone ? '노출 선택 보정' : '노출 유지');
   setAnalysisBadge('wb-badge', corr.wbApplied, corr.wbApplied ? '중립색 기준 보정' : '색감 유지');
   setAnalysisBadge('face-light-badge', corr.backlitFaces > 0, corr.backlitFaces ? '역광 얼굴 보정' : '얼굴 밝기 유지');
+  setAnalysisBadge(
+    'environment-badge', corr.environment !== 'unknown',
+    corr.environment === 'indoor' ? '실내 맞춤' : corr.environment === 'outdoor' ? '실외 맞춤' : '환경 보수 판단',
+  );
 }
 
 function setAnalysisBadge(id, active, text) {
@@ -469,7 +705,9 @@ function renderThumbs() {
   thumbStrip.innerHTML = '';
   state.photos.forEach((p, i) => {
     const item = document.createElement('div');
-    item.className = 'thumb-item' + (p.ready ? ' ready' : '') + (i === state.activeIdx ? ' active' : '');
+    const reviewState = getPhotoReviewState(p);
+    item.className = 'thumb-item' + (p.ready ? ' ready' : '') + (i === state.activeIdx ? ' active' : '')
+      + ` review-${reviewState}` + (matchesReviewFilter(p) ? '' : ' filter-hidden');
     item.dataset.idx = i;
 
     const img = document.createElement('img');
@@ -483,7 +721,11 @@ function renderThumbs() {
     const dot = document.createElement('span');
     dot.className = 'thumb-status';
 
-    item.append(img, dot, num);
+    const reviewMark = document.createElement('span');
+    reviewMark.className = 'thumb-review-mark';
+    reviewMark.textContent = reviewState === 'review' ? '!' : reviewState === 'duplicate' ? '=' : '✓';
+
+    item.append(img, dot, reviewMark, num);
     item.addEventListener('click', () => setActive(i));
     thumbStrip.appendChild(item);
   });
@@ -493,6 +735,53 @@ function renderThumbs() {
   downloadAllBtn.classList.toggle('hidden', !multi);
   totalCountEl.textContent = state.photos.length;
   updateCounter();
+}
+
+function getPhotoReviewState(p) {
+  if (p.reviewApproved) return 'good';
+  if (p.workflow?.duplicateOf !== null && p.workflow?.duplicateOf !== undefined) return 'duplicate';
+  if (p.workflow && p.workflow.issues.length === 0) return 'good';
+  return p.workflow ? 'review' : 'pending';
+}
+
+function matchesReviewFilter(p) {
+  if (state.reviewFilter === 'all') return true;
+  const status = getPhotoReviewState(p);
+  if (state.reviewFilter === 'review') return status === 'review';
+  return status === state.reviewFilter;
+}
+
+function updateWorkflowUI() {
+  const counts = { all: state.photos.length, review: 0, good: 0, duplicate: 0 };
+  state.photos.forEach(p => {
+    const status = getPhotoReviewState(p);
+    if (counts[status] !== undefined) counts[status]++;
+  });
+  Object.entries(counts).forEach(([key, value]) => {
+    const el = $(`filter-${key}-count`);
+    if (el) el.textContent = value;
+  });
+  const groups = new Set(state.photos.map(p => p.eventGroup).filter(Boolean)).size;
+  $('workflow-summary').textContent = counts.review || counts.duplicate
+    ? `${groups}개 촬영 묶음 · 확인할 사진 ${counts.review + counts.duplicate}장`
+    : `${groups}개 촬영 묶음 · 모든 사진 자동 검수 완료`;
+}
+
+function updateReviewUI(p) {
+  if (!p?.workflow) {
+    $('review-status').textContent = '자동 검수 대기';
+    $('review-detail').textContent = '초점, 노출, 중복 여부를 자동으로 확인합니다.';
+    $('event-group-label').textContent = '촬영 묶음 분석 중';
+    $('review-approve-btn').disabled = true;
+    return;
+  }
+  const status = getPhotoReviewState(p);
+  $('event-group-label').textContent = `촬영 묶음 ${p.eventGroup} · 색감 통일 적용`;
+  $('review-status').textContent = status === 'good' ? '검수 완료' : status === 'duplicate' ? '중복 후보' : '확인 필요';
+  $('review-detail').textContent = p.workflow.issues.length ? p.workflow.issues.join(' · ') : '초점과 노출이 양호합니다.';
+  $('review-approve-btn').disabled = false;
+  $('review-approve-btn').textContent = p.reviewApproved ? '확인 완료됨' : '이 사진 확인 완료';
+  $('review-card').classList.toggle('needs-review', status === 'review' || status === 'duplicate');
 }
 
 function updateThumbActive() {
@@ -511,16 +800,22 @@ function updateCounter() {
 }
 
 // ── Auto Correction ───────────────────────────────────────────
-function computeAutoCorr(imageData) {
+function computeAutoCorr(imageData, environmentOverride = 'auto') {
   const d = imageData.data;
   const n = d.length / 4;
+  const W = imageData.width, H = imageData.height;
   const hY = new Int32Array(256);
   let neutralR = 0, neutralG = 0, neutralB = 0, neutralCount = 0;
   let clippedDark = 0, clippedBright = 0;
+  let skyPixels = 0, greenPixels = 0, warmPixels = 0;
+  let noiseSum = 0, noiseCount = 0;
 
   for (let i = 0; i < d.length; i += 4) {
     const r = d[i], g = d[i+1], b = d[i+2];
     const y = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    const pixel = i / 4;
+    const x = pixel % W;
+    const row = Math.floor(pixel / W);
     hY[y]++;
     if (y <= 2) clippedDark++;
     if (y >= 253) clippedBright++;
@@ -528,6 +823,16 @@ function computeAutoCorr(imageData) {
     const chroma = Math.max(r, g, b) - Math.min(r, g, b);
     if (y > 35 && y < 225 && chroma < 24) {
       neutralR += r; neutralG += g; neutralB += b; neutralCount++;
+    }
+    if (row < H * 0.6 && b > 105 && b > r + 24 && b > g + 8) skyPixels++;
+    if (g > 65 && g > r * 1.08 && g > b * 1.05) greenPixels++;
+    if (y > 40 && r > b + 24 && r > g * 1.02) warmPixels++;
+
+    if (pixel % 16 === 0 && x < W - 1 && y < 190) {
+      const j = i + 4;
+      const nextY = 0.299 * d[j] + 0.587 * d[j+1] + 0.114 * d[j+2];
+      const diff = Math.abs(y - nextY);
+      if (diff < 35) { noiseSum += diff; noiseCount++; }
     }
   }
 
@@ -544,24 +849,58 @@ function computeAutoCorr(imageData) {
   else if (median > 188) exposureEV = Math.max(-0.3, Math.log2(168 / median) * 0.4);
 
   const dynamicRange = p95 - p05;
-  const shadowLift = median < 108 && p05 < 12 ? Math.min(14, (12 - p05) * 0.8) : 0;
-  const highlightCompression = p99 > 251 && clippedBright / n > 0.015 ? 0.1 : 0;
+  let shadowLift = median < 108 && p05 < 12 ? Math.min(14, (12 - p05) * 0.8) : 0;
+  let highlightCompression = p99 > 251 && clippedBright / n > 0.015 ? 0.1 : 0;
   const contrastBoost = dynamicRange < 105 ? Math.min(0.1, (105 - dynamicRange) / 500) : 0;
 
-  let wb = [1, 1, 1], wbApplied = false;
+  let rawWB = [1, 1, 1], wbCandidate = false;
   if (neutralCount > n * 0.008) {
     const nr = neutralR / neutralCount, ng = neutralG / neutralCount, nb = neutralB / neutralCount;
     const avg = (nr + ng + nb) / 3;
     const raw = [avg / nr, avg / ng, avg / nb];
     const maxShift = Math.max(...raw.map(v => Math.abs(v - 1)));
     if (maxShift > 0.012 && maxShift < 0.12) {
-      wb = raw.map(v => Math.max(0.96, Math.min(1.04, v)));
-      wbApplied = true;
+      rawWB = raw;
+      wbCandidate = true;
     }
+  }
+
+  const features = {
+    skyRatio: skyPixels / n,
+    greenRatio: greenPixels / n,
+    warmRatio: warmPixels / n,
+    noiseScore: noiseCount ? noiseSum / noiseCount : 0,
+  };
+  const outdoorScore = features.skyRatio * 4 + features.greenRatio * 1.5
+    + (dynamicRange > 150 ? 0.2 : 0) + (median > 115 ? 0.15 : 0);
+  const indoorScore = features.warmRatio * 2 + (median < 105 ? 0.25 : 0)
+    + (features.noiseScore > 7 ? 0.2 : 0) + (features.skyRatio < 0.01 ? 0.1 : 0);
+  let environment = 'unknown';
+  if (environmentOverride !== 'auto') environment = environmentOverride;
+  else if (outdoorScore > 0.55 && outdoorScore - indoorScore > 0.18) environment = 'outdoor';
+  else if (indoorScore > 0.48 && indoorScore - outdoorScore > 0.18) environment = 'indoor';
+  const environmentConfidence = environmentOverride !== 'auto'
+    ? 1 : Math.min(1, Math.abs(outdoorScore - indoorScore) / 1.2);
+
+  let wb = [1, 1, 1], wbApplied = false;
+  if (wbCandidate) {
+    const limit = environment === 'indoor' ? 0.06 : environment === 'outdoor' ? 0.03 : 0.04;
+    wb = rawWB.map(v => Math.max(1 - limit, Math.min(1 + limit, v)));
+    wbApplied = true;
+  }
+
+  let autoNoiseReduction = 0;
+  if (environment === 'indoor') {
+    if (median < 125 && p05 < 18) shadowLift = Math.max(shadowLift, Math.min(12, (18 - p05) * 0.4));
+    if (features.noiseScore > 6) autoNoiseReduction = Math.min(18, (features.noiseScore - 5) * 2.5);
+  } else if (environment === 'outdoor' && features.skyRatio > 0.08 && p99 > 245) {
+    highlightCompression = Math.max(highlightCompression, 0.06);
   }
 
   const correction = {
     exposureEV, shadowLift, highlightCompression, contrastBoost, wb, wbApplied,
+    environment, environmentConfidence, environmentSource: environmentOverride === 'auto' ? 'auto' : 'manual',
+    autoNoiseReduction, features,
     needsTone: Math.abs(exposureEV) > 0.01 || shadowLift > 0 || highlightCompression > 0 || contrastBoost > 0,
     stats: { p05, median, p95, p99, dynamicRange, clippedDark: clippedDark / n, clippedBright: clippedBright / n },
     guardScale: 1,
@@ -613,7 +952,9 @@ function applyProcessing() {
   if (p.faceAdjustments.length && params.autoStrength > 0) {
     autoFaceLight(ctxAfter, W, H, p.faceDetections, p.faceAdjustments, params.autoStrength / 100);
   }
-  if (params.noiseReduction > 0) applyNoiseReduction(ctxAfter, W, H, params.noiseReduction / 100);
+  const autoNoise = p.autoCorr.autoNoiseReduction * (params.autoStrength / 100);
+  const noiseReduction = Math.max(params.noiseReduction, autoNoise);
+  if (noiseReduction > 0) applyNoiseReduction(ctxAfter, W, H, noiseReduction / 100);
   if (params.clarity > 0)        applyClarity(ctxAfter, W, H, params.clarity);
   if (params.sharpness > 0)      unsharpMask(ctxAfter, W, H, params.sharpness / 100);
   if (params.skinSmooth > 0)     skinSmooth(ctxAfter, W, H, params.skinSmooth / 100, p.faceDetections);
@@ -1039,6 +1380,44 @@ for (const id of Object.keys(PARAM_MAP)) {
   });
 }
 
+$('environment-select').addEventListener('change', function () {
+  const p = state.photos[state.activeIdx];
+  if (!p?.rawPixels) return;
+  p.environmentOverride = this.value;
+  const raw = new ImageData(new Uint8ClampedArray(p.rawPixels), p.displayW, p.displayH);
+  p.autoCorr = computeAutoCorr(raw, p.environmentOverride);
+  applyGroupConsistency(p);
+  finalizePhotoAnalysis(p, raw);
+  updateAnalysisUI(p);
+  applyProcessing();
+});
+
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.reviewFilter = btn.dataset.filter;
+    document.querySelectorAll('.filter-btn').forEach(item => item.classList.toggle('active', item === btn));
+    renderThumbs();
+    const active = state.photos[state.activeIdx];
+    if (!active || !matchesReviewFilter(active)) {
+      const next = state.photos.findIndex(matchesReviewFilter);
+      if (next >= 0) setActive(next);
+    }
+  });
+});
+
+$('review-approve-btn').addEventListener('click', () => {
+  const p = state.photos[state.activeIdx];
+  if (!p?.workflow) return;
+  p.reviewApproved = true;
+  updateReviewUI(p);
+  renderThumbs();
+  updateWorkflowUI();
+  if (state.reviewFilter === 'review' || state.reviewFilter === 'duplicate') {
+    const next = state.photos.findIndex((photo, idx) => idx !== state.activeIdx && matchesReviewFilter(photo));
+    if (next >= 0) setActive(next);
+  }
+});
+
 $('apply-all-btn').addEventListener('click', () => {
   const current = state.photos[state.activeIdx];
   if (!current) return;
@@ -1148,7 +1527,8 @@ async function ensurePhotoAnalysis(idx) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   drawImageOriented(ctx, img, o, w, h);
   const analysisData = ctx.getImageData(0, 0, w, h);
-  p.autoCorr = computeAutoCorr(analysisData);
+  p.autoCorr = computeAutoCorr(analysisData, p.environmentOverride);
+  applyGroupConsistency(p);
   p.displayW = w;
   p.displayH = h;
 
@@ -1200,7 +1580,9 @@ async function buildPhotoBlob(idx) {
     autoFaceLight(fx, oW, oH, scaledDetections, p.faceAdjustments, params.autoStrength / 100);
   }
 
-  if (params.noiseReduction > 0) applyNoiseReduction(fx, oW, oH, params.noiseReduction / 100);
+  const autoNoise = p.autoCorr.autoNoiseReduction * (params.autoStrength / 100);
+  const noiseReduction = Math.max(params.noiseReduction, autoNoise);
+  if (noiseReduction > 0) applyNoiseReduction(fx, oW, oH, noiseReduction / 100);
   if (params.clarity > 0)        applyClarity(fx, oW, oH, params.clarity);
   if (params.sharpness > 0)      unsharpMask(fx, oW, oH, params.sharpness / 100);
 
@@ -1210,6 +1592,7 @@ async function buildPhotoBlob(idx) {
 
   const target = getPrintTarget(p);
   const out = target ? resizeForPrint(fc, target.w, target.h, p.crop) : fc;
+  if (target) unsharpMask(out.getContext('2d', { willReadFrequently: true }), out.width, out.height, 0.035);
 
   const fmt  = $('format-select').value;
   const qual = +$('quality').value / 100;

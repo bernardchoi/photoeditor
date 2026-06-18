@@ -138,6 +138,38 @@ header p {
   overflow: hidden;
 }
 
+.workflow-bar {
+  min-height: 68px;
+  padding: 0.65rem 0.9rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.workflow-summary { display: flex; flex-direction: column; gap: 0.2rem; }
+.workflow-summary strong { font-size: 0.92rem; }
+.workflow-summary span { color: var(--text-muted); font-size: 0.76rem; }
+.workflow-filters { display: flex; gap: 0.35rem; flex-wrap: wrap; justify-content: flex-end; }
+
+.filter-btn {
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text-muted);
+  border-radius: 7px;
+  padding: 0.42rem 0.58rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.filter-btn span { color: var(--text-dim); margin-left: 0.2rem; }
+.filter-btn.active { color: white; border-color: var(--accent); background: var(--accent-dim); }
+.filter-btn.active span { color: var(--accent); }
+
 /* ── Processing Overlay ────────────────────────────────────── */
 .processing-overlay {
   position: absolute;
@@ -370,6 +402,28 @@ header p {
 }
 
 .thumb-item.ready .thumb-status { opacity: 1; }
+.thumb-item.filter-hidden { display: none; }
+
+.thumb-review-mark {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(74, 222, 128, 0.9);
+  color: #08120c;
+  font-size: 0.62rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.thumb-item.review-review .thumb-review-mark,
+.thumb-item.review-duplicate .thumb-review-mark { background: #fbbf24; color: #241600; }
+.thumb-item.review-pending .thumb-review-mark { display: none; }
 
 /* ── Controls Panel ────────────────────────────────────────── */
 .controls-panel {
@@ -397,6 +451,39 @@ header p {
   background: var(--green-dim);
   border-color: rgba(74, 222, 128, 0.2);
 }
+
+.review-card {
+  padding: 0.8rem;
+  border: 1px solid rgba(74, 222, 128, 0.24);
+  border-radius: 9px;
+  background: var(--green-dim);
+}
+
+.review-card.needs-review {
+  border-color: rgba(251, 191, 36, 0.32);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.review-card-title { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.review-card-title strong { font-size: 0.9rem; }
+.review-card-title span { color: var(--text-muted); font-size: 0.67rem; text-align: right; }
+#review-detail { color: var(--text-muted); font-size: 0.76rem; line-height: 1.45; margin-top: 0.35rem; }
+
+.btn-review {
+  width: 100%;
+  margin-top: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.55rem;
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-review:hover { border-color: var(--accent); }
+.btn-review:disabled { opacity: 0.45; cursor: default; }
 
 .control-group {
   display: flex;
@@ -455,6 +542,19 @@ header p {
 .analysis-title span { color: var(--green); font-size: 0.72rem; font-weight: 700; }
 #analysis-detail { color: var(--text-muted); font-size: 0.76rem; line-height: 1.45; }
 .auto-strength-row { grid-template-columns: 80px 1fr 36px; margin-top: 0.15rem; }
+
+.environment-override {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--border);
+}
+
+.environment-override label { color: var(--text-muted); font-size: 0.76rem; }
+.environment-override select { padding: 3px 7px; font-size: 0.78rem; }
 
 .setting-actions,
 .crop-actions {
@@ -837,6 +937,18 @@ select {
     height: calc(100dvh - 56px - 72px - 72px);
     min-height: 240px;
   }
+
+  .workflow-bar {
+    min-height: 92px;
+    padding: 0.5rem 0.65rem;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .workflow-summary { width: 100%; flex-direction: row; justify-content: space-between; align-items: baseline; }
+  .workflow-filters { width: 100%; justify-content: stretch; flex-wrap: nowrap; overflow-x: auto; }
+  .filter-btn { flex: 1 0 auto; min-height: 36px; }
 
   .comparison-container {
     flex: 1;
