@@ -90,17 +90,35 @@ $('reset-btn').addEventListener('click', () => {
   photoCounter.classList.add('hidden');
 });
 
+// ── RAW / unsupported format detection ───────────────────────
+const RAW_EXTS = new Set(['cr2','cr3','cr','nef','nrw','arw','srf','sr2','raf','orf','rw2','rwl','dng','pef','3fr','mef','mrw','x3f']);
+
+function classifyFiles(files) {
+  const ok = [], raw = [], bad = [];
+  for (const f of files) {
+    const ext = f.name.split('.').pop().toLowerCase();
+    if (RAW_EXTS.has(ext))                 raw.push(f.name);
+    else if (!f.type.startsWith('image/')) bad.push(f.name);
+    else                                   ok.push(f);
+  }
+  if (raw.length) showToast(`RAW 파일은 지원되지 않습니다.\n카메라에서 JPEG로 내보낸 후 사용해주세요.\n(${raw.join(', ')})`);
+  if (bad.length) showToast(`이미지 파일이 아닙니다: ${bad.join(', ')}`);
+  return ok;
+}
+
 // ── File Handling ─────────────────────────────────────────────
 function handleFiles(files) {
-  if (!files.length) return;
+  const ok = classifyFiles(files);
+  if (!ok.length) return;
   uploadZone.style.display = 'none';
   editor.classList.remove('hidden');
-  loadImages(files, true);
+  loadImages(ok, true);
 }
 
 async function addMoreFiles(files) {
-  if (!files.length) return;
-  await loadImages(files, false);
+  const ok = classifyFiles(files);
+  if (!ok.length) return;
+  await loadImages(ok, false);
 }
 
 async function loadImages(files, isFirst) {
@@ -115,6 +133,7 @@ async function loadImages(files, isFirst) {
       name: img.name,
       objectURL: img.objectURL,
       orientation: img.orientation || 1,
+      sizeMB: img.sizeMB || 0,
       autoCorr: null,
       faceDetections: [],
       displayW: 0,
@@ -132,11 +151,15 @@ async function loadImages(files, isFirst) {
 }
 
 async function loadImageFile(file) {
-  const orientation = await readExifOrientation(file);
+  const [orientation, adobeRgb] = await Promise.all([
+    readExifOrientation(file),
+    checkAdobeRgb(file),
+  ]);
+  if (adobeRgb) showToast('Adobe RGB 색공간이 감지됐습니다.\n브라우저는 sRGB로 표시하므로 색감이 다소 달라 보일 수 있습니다.', 'info');
   const url = URL.createObjectURL(file);
   return new Promise(resolve => {
     const img = new Image();
-    img.onload = () => resolve({ image: img, name: file.name, objectURL: url, orientation });
+    img.onload = () => resolve({ image: img, name: file.name, objectURL: url, orientation, sizeMB: (file.size / 1e6).toFixed(1) });
     img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
     img.src = url;
   });
@@ -175,6 +198,22 @@ function readExifOrientation(file) {
     };
     reader.onerror = () => resolve(1);
     reader.readAsArrayBuffer(file.slice(0, 65536));
+  });
+}
+
+// Detect Adobe RGB by looking for 'AdobeRGB' or ICC profile marker in JPEG
+function checkAdobeRgb(file) {
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const bytes = new Uint8Array(e.target.result);
+        const str = String.fromCharCode(...bytes);
+        resolve(str.includes('AdobeRGB') || str.includes('Adobe RGB'));
+      } catch { resolve(false); }
+    };
+    reader.onerror = () => resolve(false);
+    reader.readAsArrayBuffer(file.slice(0, 8192));
   });
 }
 
@@ -592,10 +631,13 @@ async function exportPhoto(idx) {
   const swap = o >= 5;
   const oW = swap ? img.naturalHeight : img.naturalWidth;
   const oH = swap ? img.naturalWidth  : img.naturalHeight;
+  const mp = ((oW * oH) / 1e6).toFixed(1);
+  const isLarge = oW * oH > 15e6; // > 15MP
 
   const fc = Object.assign(document.createElement('canvas'), { width: oW, height: oH });
   const fx = fc.getContext('2d', { willReadFrequently: true });
   drawImageOriented(fx, img, o, oW, oH);
+  if (isLarge) setProc(`고화질 처리 중 (${mp}MP)… 잠시 기다려 주세요`);
 
   // Recompute auto correction at full resolution
   const fullAutoCorr = computeAutoCorr(fx.getImageData(0, 0, oW, oH));
@@ -697,6 +739,15 @@ const tick  = () => new Promise(r => setTimeout(r, 30));
 function showProc(msg, sub = '') { procText.textContent = msg; procSub.textContent = sub; procOverlay.classList.remove('hidden'); }
 function setProc(msg)  { procText.textContent = msg; }
 function hideProc()    { procOverlay.classList.add('hidden'); }
+
+function showToast(msg, type = 'error') {
+  const container = $('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast${type === 'info' ? ' info' : ''}`;
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
 
 // ── Mobile Bottom Sheet ───────────────────────────────────────
 (function initBottomSheet() {

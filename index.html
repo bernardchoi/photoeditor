@@ -26,7 +26,8 @@
       <div class="upload-content" id="upload-content">
         <div class="upload-icon">↑</div>
         <p class="upload-title">사진을 드래그하거나 클릭해서 업로드</p>
-        <p class="upload-hint">JPG · PNG · WEBP 지원 · 여러 장 동시 업로드 가능</p>
+        <p class="upload-hint">JPG · PNG · WEBP 지원 · 캐논/갤럭시 JPEG · 여러 장 동시 업로드</p>
+        <p class="upload-hint raw-note">※ 캐논 RAW(CR2/CR3)는 카메라에서 JPEG로 내보낸 후 사용해주세요</p>
         <button class="btn-primary" id="upload-btn">파일 선택</button>
         <input type="file" id="file-input" accept="image/*" multiple hidden>
       </div>
@@ -163,6 +164,9 @@
       </aside>
     </section>
   </main>
+
+  <!-- Toast notifications -->
+  <div id="toast-container" class="toast-container"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
   <script src="app.js"></script>
