@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoRetouch — 자동 사진 보정</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <span class="logo">◈</span>
+      <div>
+        <h1>AutoRetouch</h1>
+        <p>자동 보정 · 피부 보정 · 인화용 다운로드</p>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Upload -->
+    <section id="upload-zone">
+      <div class="upload-content" id="upload-content">
+        <div class="upload-icon">↑</div>
+        <p class="upload-title">사진을 드래그하거나 클릭해서 업로드</p>
+        <p class="upload-hint">JPG · PNG · WEBP 지원 · 원본 해상도 유지</p>
+        <button class="btn-primary" id="upload-btn">파일 선택</button>
+        <input type="file" id="file-input" accept="image/*" hidden>
+      </div>
+    </section>
+
+    <!-- Editor -->
+    <section id="editor" class="hidden">
+      <!-- Processing Overlay -->
+      <div id="processing-overlay" class="processing-overlay hidden">
+        <div class="spinner"></div>
+        <p id="processing-text">사진 분석 중...</p>
+      </div>
+
+      <!-- Comparison View -->
+      <div class="comparison-container">
+        <div class="comparison-wrapper" id="comparison-wrapper">
+          <canvas id="canvas-before"></canvas>
+          <canvas id="canvas-after"></canvas>
+          <div class="comparison-slider" id="comparison-slider">
+            <div class="slider-line"></div>
+            <div class="slider-handle">
+              <span>◁</span><span>▷</span>
+            </div>
+          </div>
+          <div class="comparison-labels">
+            <span>원본</span>
+            <span>보정</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <aside class="controls-panel">
+        <!-- Status -->
+        <div id="face-status" class="face-status">얼굴 감지 대기 중...</div>
+
+        <!-- Auto Retouch -->
+        <div class="control-group">
+          <div class="group-header">
+            <span class="group-icon">✦</span>
+            <h3>자동 보정</h3>
+          </div>
+          <div class="auto-badges">
+            <span class="badge active">레벨 보정</span>
+            <span class="badge active">화이트 밸런스</span>
+            <span class="badge active">자동 선명도</span>
+          </div>
+        </div>
+
+        <!-- Manual Adjustments -->
+        <div class="control-group">
+          <div class="group-header">
+            <span class="group-icon">◎</span>
+            <h3>세부 조정</h3>
+          </div>
+          <div class="slider-row">
+            <label>밝기</label>
+            <input type="range" id="brightness" min="-100" max="100" value="0">
+            <span id="brightness-val">0</span>
+          </div>
+          <div class="slider-row">
+            <label>대비</label>
+            <input type="range" id="contrast" min="-100" max="100" value="0">
+            <span id="contrast-val">0</span>
+          </div>
+          <div class="slider-row">
+            <label>채도</label>
+            <input type="range" id="saturation" min="-100" max="100" value="0">
+            <span id="saturation-val">0</span>
+          </div>
+          <div class="slider-row">
+            <label>선명도</label>
+            <input type="range" id="sharpness" min="0" max="100" value="30">
+            <span id="sharpness-val">30</span>
+          </div>
+          <div class="slider-row">
+            <label>피부 보정</label>
+            <input type="range" id="skin-smooth" min="0" max="100" value="50">
+            <span id="skin-smooth-val">50</span>
+          </div>
+        </div>
+
+        <!-- Export -->
+        <div class="control-group">
+          <div class="group-header">
+            <span class="group-icon">⬇</span>
+            <h3>다운로드</h3>
+          </div>
+          <p class="group-desc">인화 사이즈 선택 (300 DPI)</p>
+          <div class="size-grid">
+            <button class="size-btn active" data-size="original">원본</button>
+            <button class="size-btn" data-size="3x5">3×5인치</button>
+            <button class="size-btn" data-size="4x6">4×6인치</button>
+            <button class="size-btn" data-size="5x7">5×7인치</button>
+            <button class="size-btn" data-size="8x10">8×10인치</button>
+            <button class="size-btn" data-size="a4">A4</button>
+          </div>
+          <div class="format-row">
+            <div class="format-item">
+              <label>형식</label>
+              <select id="format-select">
+                <option value="jpeg">JPG</option>
+                <option value="png">PNG</option>
+              </select>
+            </div>
+            <div class="format-item quality-item">
+              <label>품질 <span id="quality-val">95%</span></label>
+              <input type="range" id="quality" min="60" max="100" value="95">
+            </div>
+          </div>
+          <button class="btn-download" id="download-btn">다운로드</button>
+        </div>
+
+        <button class="btn-reset" id="reset-btn">새 사진 업로드</button>
+      </aside>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
