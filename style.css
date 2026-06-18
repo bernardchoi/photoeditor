@@ -19,6 +19,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Apple SD Gothic Neo', sans-serif;
+  font-size: 18px;
   min-height: 100vh;
   overflow-x: hidden;
 }
@@ -40,7 +41,7 @@ header {
 .header-right { display: flex; align-items: center; }
 
 .photo-counter {
-  font-size: 0.75rem;
+  font-size: 0.95rem;
   color: var(--text-muted);
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -61,14 +62,14 @@ header {
 }
 
 header h1 {
-  font-size: 1rem;
+  font-size: 1.05rem;
   font-weight: 700;
   letter-spacing: -0.3px;
   color: var(--text);
 }
 
 header p {
-  font-size: 0.7rem;
+  font-size: 0.82rem;
   color: var(--text-muted);
   letter-spacing: 0.2px;
   margin-top: 1px;
@@ -108,13 +109,13 @@ header p {
 }
 
 .upload-title {
-  font-size: 1.05rem;
+  font-size: 1.15rem;
   font-weight: 600;
   margin-bottom: 0.5rem;
 }
 
 .upload-hint {
-  font-size: 0.8rem;
+  font-size: 0.92rem;
   color: var(--text-muted);
   margin-bottom: 2rem;
   letter-spacing: 0.3px;
@@ -165,7 +166,7 @@ header p {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 #processing-text {
-  font-size: 0.9rem;
+  font-size: 1.05rem;
   color: var(--text-muted);
   letter-spacing: 0.3px;
 }
@@ -261,7 +262,7 @@ header p {
   color: rgba(255,255,255,0.85);
   padding: 3px 10px;
   border-radius: 20px;
-  font-size: 0.72rem;
+  font-size: 0.82rem;
   font-weight: 600;
   letter-spacing: 0.5px;
   backdrop-filter: blur(4px);
@@ -346,7 +347,7 @@ header p {
 }
 
 .face-status {
-  font-size: 0.75rem;
+  font-size: 0.95rem;
   color: var(--text-muted);
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -375,11 +376,11 @@ header p {
 
 .group-icon {
   color: var(--accent);
-  font-size: 0.75rem;
+  font-size: 0.95rem;
 }
 
 .group-header h3 {
-  font-size: 0.75rem;
+  font-size: 0.95rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -394,7 +395,7 @@ header p {
 }
 
 .group-desc {
-  font-size: 0.75rem;
+  font-size: 0.95rem;
   color: var(--text-dim);
   margin-top: -0.25rem;
 }
@@ -407,7 +408,7 @@ header p {
 }
 
 .badge {
-  font-size: 0.7rem;
+  font-size: 0.82rem;
   padding: 3px 9px;
   border-radius: 20px;
   border: 1px solid var(--border);
@@ -430,13 +431,13 @@ header p {
 }
 
 .slider-row label {
-  font-size: 0.8rem;
+  font-size: 0.92rem;
   color: var(--text-muted);
   white-space: nowrap;
 }
 
 .slider-row span {
-  font-size: 0.75rem;
+  font-size: 0.95rem;
   color: var(--text-dim);
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -480,7 +481,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text-muted);
-  font-size: 0.7rem;
+  font-size: 0.82rem;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s;
@@ -510,7 +511,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  font-size: 0.78rem;
+  font-size: 1.05rem;
   color: var(--text-muted);
 }
 
@@ -523,7 +524,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .quality-item label {
   display: flex;
   justify-content: space-between;
-  font-size: 0.78rem;
+  font-size: 1.05rem;
   color: var(--text-muted);
 }
 
@@ -538,7 +539,7 @@ select {
   color: var(--text);
   padding: 4px 8px;
   border-radius: 5px;
-  font-size: 0.78rem;
+  font-size: 1.05rem;
   outline: none;
   cursor: pointer;
 }
@@ -550,7 +551,7 @@ select {
   border: none;
   padding: 0.7rem 2.25rem;
   border-radius: 8px;
-  font-size: 0.9rem;
+  font-size: 1.05rem;
   font-weight: 600;
   cursor: pointer;
   transition: opacity 0.15s;
@@ -566,7 +567,7 @@ select {
   border: none;
   padding: 0.8rem;
   border-radius: 8px;
-  font-size: 0.9rem;
+  font-size: 1.05rem;
   font-weight: 700;
   cursor: pointer;
   transition: opacity 0.15s;
@@ -583,7 +584,7 @@ select {
   border: 1px solid rgba(123, 110, 246, 0.3);
   padding: 0.7rem;
   border-radius: 8px;
-  font-size: 0.85rem;
+  font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s;
@@ -609,7 +610,7 @@ select {
   border: 1px solid var(--border);
   padding: 0.6rem;
   border-radius: 8px;
-  font-size: 0.78rem;
+  font-size: 1.05rem;
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -626,7 +627,7 @@ select {
   border: 1px solid var(--border);
   padding: 0.6rem;
   border-radius: 8px;
-  font-size: 0.78rem;
+  font-size: 1.05rem;
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -637,14 +638,14 @@ select {
 }
 
 .processing-sub {
-  font-size: 0.78rem;
+  font-size: 1.05rem;
   color: var(--text-dim);
   margin-top: -0.5rem;
 }
 
 .raw-note {
   color: var(--text-dim);
-  font-size: 0.72rem;
+  font-size: 0.82rem;
   margin-top: -0.75rem;
   margin-bottom: 1.5rem;
 }
@@ -787,7 +788,7 @@ select {
   .panel-handle { position: relative; }
 
   .handle-label {
-    font-size: 0.8rem;
+    font-size: 0.92rem;
     font-weight: 600;
     color: var(--text-muted);
     text-transform: uppercase;
@@ -796,7 +797,7 @@ select {
   }
 
   .handle-chevron {
-    font-size: 0.7rem;
+    font-size: 0.82rem;
     color: var(--text-dim);
     margin-top: 6px;
     transition: transform 0.3s;
@@ -819,7 +820,7 @@ select {
 
   .size-btn {
     padding: 0.6rem 0.25rem;
-    font-size: 0.72rem;
+    font-size: 0.82rem;
   }
 
   .btn-download,
@@ -827,7 +828,7 @@ select {
   .btn-add,
   .btn-reset {
     padding: 0.85rem;
-    font-size: 0.9rem;
+    font-size: 1.05rem;
   }
 
   .slider-row {
@@ -844,7 +845,7 @@ select {
 
   /* Face status */
   .face-status {
-    font-size: 0.72rem;
+    font-size: 0.82rem;
   }
 
   /* Bottom actions sticky inside sheet */
