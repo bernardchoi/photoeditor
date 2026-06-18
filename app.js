@@ -258,13 +258,15 @@ function computeAutoCorr(imageData) {
   }
 
   const avg = (rS + gS + bS) / (3 * n);
+  // Clamp WB shifts to ±8% — prevents yellow/blue cast on outdoor scenes with dominant sky
+  const wbClamp = (v) => Math.max(0.92, Math.min(1.08, v));
   return {
     levels: [
       [pct(hR, clip), pct(hR, n - clip)],
       [pct(hG, clip), pct(hG, n - clip)],
       [pct(hB, clip), pct(hB, n - clip)],
     ],
-    wb: [avg / (rS / n), avg / (gS / n), avg / (bS / n)],
+    wb: [wbClamp(avg / (rS / n)), wbClamp(avg / (gS / n)), wbClamp(avg / (bS / n))],
   };
 }
 
