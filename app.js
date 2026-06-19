@@ -17,6 +17,7 @@ const {
   evaluateQualitySignals, isDuplicateCandidate, colorDistance, getSafeExportDimensions, shouldFlushZip,
 } = window.SelectionEngine;
 window.AutoRetouchDiagnostics = window.SelectionEngine;
+const { luminance, transformLuminance, applySmartPixel, adjustLuminancePixel } = window.RetouchEngine;
 
 const DEFAULT_PARAMS = Object.freeze({
   autoStrength: 70,
@@ -847,7 +848,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
   const n = d.length / 4;
   const W = imageData.width, H = imageData.height;
   const hY = new Int32Array(256);
-  let neutralR = 0, neutralG = 0, neutralB = 0, neutralCount = 0;
+  let neutralR = 0, neutralG = 0, neutralB = 0, neutralCount = 0, neutralChromaSum = 0;
   let clippedDark = 0, clippedBright = 0;
   let skyPixels = 0, greenPixels = 0, warmPixels = 0;
   let noiseSum = 0, noiseCount = 0;
@@ -864,7 +865,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
 
     const chroma = Math.max(r, g, b) - Math.min(r, g, b);
     if (y > 35 && y < 225 && chroma < 24) {
-      neutralR += r; neutralG += g; neutralB += b; neutralCount++;
+      neutralR += r; neutralG += g; neutralB += b; neutralChromaSum += chroma; neutralCount++;
     }
     if (row < H * 0.6 && b > 105 && b > r + 24 && b > g + 8) skyPixels++;
     if (g > 65 && g > r * 1.08 && g > b * 1.05) greenPixels++;
@@ -895,7 +896,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
   let highlightCompression = p99 > 251 && clippedBright / n > 0.015 ? 0.1 : 0;
   const contrastBoost = dynamicRange < 105 ? Math.min(0.1, (105 - dynamicRange) / 500) : 0;
 
-  let rawWB = [1, 1, 1], wbCandidate = false;
+  let rawWB = [1, 1, 1], wbCandidate = false, wbConfidence = 0;
   if (neutralCount > n * 0.008) {
     const nr = neutralR / neutralCount, ng = neutralG / neutralCount, nb = neutralB / neutralCount;
     const avg = (nr + ng + nb) / 3;
@@ -904,6 +905,9 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
     if (maxShift > 0.012 && maxShift < 0.12) {
       rawWB = raw;
       wbCandidate = true;
+      const coverage = Math.min(1, neutralCount / Math.max(1, n * 0.06));
+      const neutrality = 1 - Math.min(1, (neutralChromaSum / neutralCount) / 24);
+      wbConfidence = Math.max(0.35, Math.min(1, coverage * 0.7 + neutrality * 0.45));
     }
   }
 
@@ -940,7 +944,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
   }
 
   const correction = {
-    exposureEV, shadowLift, highlightCompression, contrastBoost, wb, wbApplied,
+    exposureEV, shadowLift, highlightCompression, contrastBoost, wb, wbApplied, wbConfidence,
     environment, environmentConfidence, environmentSource: environmentOverride === 'auto' ? 'auto' : 'manual',
     autoNoiseReduction, features,
     needsTone: Math.abs(exposureEV) > 0.01 || shadowLift > 0 || highlightCompression > 0 || contrastBoost > 0,
@@ -951,27 +955,21 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
   return correction;
 }
 
-function transformLuminance(y, corr, strength) {
-  let next = y * Math.pow(2, corr.exposureEV * strength);
-  next += corr.shadowLift * strength * Math.pow(1 - y / 255, 2);
-  if (next > 180) next -= (next - 180) * corr.highlightCompression * strength;
-  next = 128 + (next - 128) * (1 + corr.contrastBoost * strength);
-  return Math.max(0, Math.min(255, next));
-}
-
 function evaluateCorrectionSafety(d, corr) {
-  let before = 0, after = 0, count = 0;
+  let before = 0, after = 0, count = 0, totalShift = 0;
   for (let i = 0; i < d.length; i += 80) {
     const r = d[i], g = d[i+1], b = d[i+2];
-    const y = 0.299 * r + 0.587 * g + 0.114 * b;
-    const nextY = transformLuminance(y, corr, 1);
-    const ratio = y > 1 ? nextY / y : 1;
     if (r <= 1 || g <= 1 || b <= 1 || r >= 254 || g >= 254 || b >= 254) before++;
-    const rr = r * ratio * corr.wb[0], gg = g * ratio * corr.wb[1], bb = b * ratio * corr.wb[2];
+    const [rr, gg, bb] = applySmartPixel(r, g, b, corr, 1);
     if (rr <= 1 || gg <= 1 || bb <= 1 || rr >= 254 || gg >= 254 || bb >= 254) after++;
+    totalShift += (Math.abs(rr - r) + Math.abs(gg - g) + Math.abs(bb - b)) / 3;
     count++;
   }
-  return after / count > before / count + 0.005 ? 0.35 : 1;
+  const clipIncrease = Math.max(0, (after - before) / Math.max(1, count));
+  const averageShift = totalShift / Math.max(1, count);
+  const clippingScale = Math.max(0.35, 1 - clipIncrease * 35);
+  const shiftScale = averageShift > 22 ? Math.max(0.5, 22 / averageShift) : 1;
+  return Math.min(clippingScale, shiftScale);
 }
 
 // ── Processing Pipeline ───────────────────────────────────────
@@ -1009,12 +1007,10 @@ function applySmartAuto(d, corr, amount) {
   if (strength <= 0) return;
   for (let i = 0; i < d.length; i += 4) {
     const r = d[i], g = d[i+1], b = d[i+2];
-    const y = 0.299 * r + 0.587 * g + 0.114 * b;
-    const nextY = transformLuminance(y, corr, strength);
-    const ratio = y > 1 ? nextY / y : 1;
-    d[i]   = clamp(r * ratio * (1 + (corr.wb[0] - 1) * strength));
-    d[i+1] = clamp(g * ratio * (1 + (corr.wb[1] - 1) * strength));
-    d[i+2] = clamp(b * ratio * (1 + (corr.wb[2] - 1) * strength));
+    const corrected = applySmartPixel(r, g, b, corr, strength);
+    d[i] = clamp(corrected[0]);
+    d[i+1] = clamp(corrected[1]);
+    d[i+2] = clamp(corrected[2]);
   }
 }
 
@@ -1038,10 +1034,16 @@ function applyBCS(d, br, co, sa) {
 // ── Temperature ───────────────────────────────────────────────
 function applyTemperature(d, amount) {
   if (!amount) return;
-  const rv = amount * 0.8, bv = -amount * 0.8;
+  const shift = amount / 100 * 0.08;
+  const corr = {
+    exposureEV: 0, shadowLift: 0, highlightCompression: 0, contrastBoost: 0,
+    wb: [1 + shift, 1, 1 - shift], wbConfidence: 1,
+  };
   for (let i = 0; i < d.length; i += 4) {
-    d[i]   = clamp(d[i]   + rv);
-    d[i+2] = clamp(d[i+2] + bv);
+    const corrected = applySmartPixel(d[i], d[i+1], d[i+2], corr, 1);
+    d[i] = clamp(corrected[0]);
+    d[i+1] = clamp(corrected[1]);
+    d[i+2] = clamp(corrected[2]);
   }
 }
 
@@ -1050,15 +1052,15 @@ function applyHighlightsShadows(d, highlights, shadows) {
   if (!highlights && !shadows) return;
   const hf = highlights / 100, sf = shadows / 100;
   for (let i = 0; i < d.length; i += 4) {
-    // compute luminance once, share weight across all 3 channels
-    const lum = (0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]) / 255;
+    const y = luminance(d[i], d[i+1], d[i+2]);
+    const lum = y / 255;
     const hw = lum * lum;
     const sw = (1 - lum) * (1 - lum);
-    const delta = (hf * hw * (1 - lum) - hf * hw * lum * 0.5
-                 + sf * sw * (1 - lum) * 0.8) * 255;
-    d[i]   = clamp(d[i]   + delta);
-    d[i+1] = clamp(d[i+1] + delta);
-    d[i+2] = clamp(d[i+2] + delta);
+    const nextY = Math.max(0, Math.min(255, y + sf * 34 * sw - hf * 30 * hw));
+    const corrected = adjustLuminancePixel(d[i], d[i+1], d[i+2], nextY);
+    d[i] = clamp(corrected[0]);
+    d[i+1] = clamp(corrected[1]);
+    d[i+2] = clamp(corrected[2]);
   }
 }
 
@@ -1073,13 +1075,17 @@ function applyClarity(ctx, W, H, amount) {
   const d = orig.data, b = blur.data;
   const str = (amount / 100) * 0.7;
   for (let i = 0; i < d.length; i += 4) {
-    const lum = (d[i] + d[i+1] + d[i+2]) / 3 / 255;
-    // only boost midtones (avoid blowing highlights/crushing shadows)
+    const y = luminance(d[i], d[i+1], d[i+2]);
+    const blurY = luminance(b[i], b[i+1], b[i+2]);
+    const lum = y / 255;
     const mid = 1 - Math.abs(lum - 0.5) * 2;
     const w = str * mid;
-    d[i]   = clamp(d[i]   + w * (d[i]   - b[i]));
-    d[i+1] = clamp(d[i+1] + w * (d[i+1] - b[i+1]));
-    d[i+2] = clamp(d[i+2] + w * (d[i+2] - b[i+2]));
+    const detail = y - blurY;
+    const nextY = y + (Math.abs(detail) > 1.2 ? detail * w : 0);
+    const corrected = adjustLuminancePixel(d[i], d[i+1], d[i+2], nextY);
+    d[i] = clamp(corrected[0]);
+    d[i+1] = clamp(corrected[1]);
+    d[i+2] = clamp(corrected[2]);
   }
   ctx.putImageData(orig, 0, 0);
 }
@@ -1114,11 +1120,18 @@ function unsharpMask(ctx, W, H, amount) {
   const blur = new ImageData(new Uint8ClampedArray(orig.data), W, H);
   boxBlur(blur, 2); boxBlur(blur, 2);
   const d = orig.data, b = blur.data;
-  const str = amount * 1.2;
+  const str = amount * 1.05;
   for (let i = 0; i < d.length; i += 4) {
-    d[i]   = clamp(d[i]   + str * (d[i]   - b[i]));
-    d[i+1] = clamp(d[i+1] + str * (d[i+1] - b[i+1]));
-    d[i+2] = clamp(d[i+2] + str * (d[i+2] - b[i+2]));
+    const y = luminance(d[i], d[i+1], d[i+2]);
+    const blurY = luminance(b[i], b[i+1], b[i+2]);
+    const detail = y - blurY;
+    const threshold = 2 + Math.pow(1 - y / 255, 2) * 4;
+    const safeDetail = Math.max(-18, Math.min(18, detail));
+    const nextY = y + (Math.abs(detail) > threshold ? safeDetail * str : 0);
+    const corrected = adjustLuminancePixel(d[i], d[i+1], d[i+2], nextY);
+    d[i] = clamp(corrected[0]);
+    d[i+1] = clamp(corrected[1]);
+    d[i+2] = clamp(corrected[2]);
   }
   ctx.putImageData(orig, 0, 0);
 }
@@ -1152,9 +1165,11 @@ function autoFaceLight(ctx, W, H, detections, adjustments, strength) {
         const weight = Math.pow(1 - distance, 1.7);
         const delta = lift * weight;
         const i = (y * W + x) * 4;
-        d[i] = clamp(d[i] + delta);
-        d[i+1] = clamp(d[i+1] + delta);
-        d[i+2] = clamp(d[i+2] + delta);
+        const currentY = luminance(d[i], d[i+1], d[i+2]);
+        const corrected = adjustLuminancePixel(d[i], d[i+1], d[i+2], Math.min(255, currentY + delta));
+        d[i] = clamp(corrected[0]);
+        d[i+1] = clamp(corrected[1]);
+        d[i+2] = clamp(corrected[2]);
       }
     }
   });
@@ -1203,7 +1218,9 @@ function faceSmooth(ctx, W, H, amount, detections) {
   const mask = mx.getImageData(0, 0, W, H).data;
   const d = orig.data, bl = blur.data;
   for (let i = 0; i < d.length; i += 4) {
-    const a = (mask[i] / 255) * amount;
+    const texture = Math.max(Math.abs(d[i] - bl[i]), Math.abs(d[i+1] - bl[i+1]), Math.abs(d[i+2] - bl[i+2]));
+    const textureProtection = Math.max(0, 1 - texture / 20);
+    const a = (mask[i] / 255) * Math.min(0.5, amount) * textureProtection;
     d[i]   = d[i]   * (1 - a) + bl[i]   * a;
     d[i+1] = d[i+1] * (1 - a) + bl[i+1] * a;
     d[i+2] = d[i+2] * (1 - a) + bl[i+2] * a;
