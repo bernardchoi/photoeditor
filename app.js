@@ -10,6 +10,14 @@ const PRINT_SIZES = {
   'a4':   { w: 2480, h: 3508 },
 };
 
+const MAX_EXPORT_PIXELS = 18_000_000;
+const MAX_EXPORT_EDGE = 6500;
+const ZIP_CHUNK_BYTES = 120 * 1024 * 1024;
+const {
+  evaluateQualitySignals, isDuplicateCandidate, colorDistance, getSafeExportDimensions, shouldFlushZip,
+} = window.SelectionEngine;
+window.AutoRetouchDiagnostics = window.SelectionEngine;
+
 const DEFAULT_PARAMS = Object.freeze({
   autoStrength: 70,
   brightness: 0, contrast: 0, saturation: 0, sharpness: 0, skinSmooth: 0,
@@ -27,6 +35,7 @@ const state = {
   selectedSize: 'original',
   sliderPos: 0.5,
   reviewFilter: 'all',
+  cancelRequested: false,
   params: makeDefaultParams(),
 };
 let faceApiReadyPromise = null;
@@ -41,6 +50,8 @@ const editor        = $('editor');
 const procOverlay   = $('processing-overlay');
 const procText      = $('processing-text');
 const procSub       = $('processing-sub');
+const procProgress  = $('processing-progress-bar');
+const procCancel    = $('processing-cancel');
 const canvasBefore  = $('canvas-before');
 const canvasAfter   = $('canvas-after');
 const ctxBefore     = canvasBefore.getContext('2d', { willReadFrequently: true });
@@ -168,6 +179,7 @@ async function loadImages(files, isFirst) {
       faceAdjustments: [],
       workflow: null,
       reviewApproved: false,
+      validationResult: null,
       eventGroup: null,
       displayW: 0,
       displayH: 0,
@@ -180,7 +192,12 @@ async function loadImages(files, isFirst) {
 
   // Switch to first new photo
   await setActive(start);
-  await analyzeEventPhotos(start);
+  try {
+    await analyzeEventPhotos(start);
+  } catch (error) {
+    if (error.name === 'AbortError') showToast('자동 검수를 중지했습니다. 분석된 사진은 그대로 사용할 수 있습니다.', 'info');
+    else throw error;
+  }
   hideProc();
 }
 
@@ -237,6 +254,7 @@ function analyzePhotoQuality(imageData) {
   const { data, width: W, height: H } = imageData;
   let focusSum = 0, focusSq = 0, focusCount = 0;
   let rSum = 0, gSum = 0, bSum = 0, colorCount = 0;
+  const luminanceBins = new Array(16).fill(0);
   const gray = (x, y) => {
     const i = (y * W + x) * 4;
     return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
@@ -249,6 +267,8 @@ function analyzePhotoQuality(imageData) {
       focusCount++;
       const i = (y * W + x) * 4;
       rSum += data[i]; gSum += data[i + 1]; bSum += data[i + 2]; colorCount++;
+      const luminance = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      luminanceBins[Math.min(15, Math.floor(luminance / 16))]++;
     }
   }
   const focusMean = focusCount ? focusSum / focusCount : 0;
@@ -256,6 +276,7 @@ function analyzePhotoQuality(imageData) {
   return {
     focusScore,
     avgColor: colorCount ? [rSum / colorCount, gSum / colorCount, bSum / colorCount] : [128, 128, 128],
+    luminanceHistogram: luminanceBins.map(value => colorCount ? value / colorCount : 0),
   };
 }
 
@@ -278,13 +299,6 @@ function createDifferenceHash(imageData) {
   return hash;
 }
 
-function hashDistance(a, b) {
-  if (!a || !b || a.length !== b.length) return Infinity;
-  let distance = 0;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) distance++;
-  return distance;
-}
-
 function pointDistance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -299,11 +313,13 @@ function inspectFaceLandmarks(detections, width, height) {
   let closedEyes = 0, edgeFaces = 0;
   detections.forEach(det => {
     const points = det.landmarks?.positions || [];
-    if (points.length >= 68) {
-      const eyeScore = (eyeAspectRatio(points.slice(36, 42)) + eyeAspectRatio(points.slice(42, 48))) / 2;
-      if (eyeScore < 0.18) closedEyes++;
-    }
     const box = det.detection?.box;
+    const faceLargeEnough = box && box.width >= Math.max(36, width * 0.035);
+    if (points.length >= 68 && faceLargeEnough) {
+      const leftEye = eyeAspectRatio(points.slice(36, 42));
+      const rightEye = eyeAspectRatio(points.slice(42, 48));
+      if (leftEye < 0.16 && rightEye < 0.16) closedEyes++;
+    }
     if (box && (box.x < width * 0.015 || box.y < height * 0.015
       || box.x + box.width > width * 0.985 || box.y + box.height > height * 0.985)) edgeFaces++;
   });
@@ -314,13 +330,18 @@ async function analyzeEventPhotos(start = 0) {
   if (!state.photos.length) return;
   showProc('행사 사진 자동 정리 중...', '초점 · 노출 · 중복 · 촬영 묶음 확인');
   if (faceApiReadyPromise) await faceApiReadyPromise;
+  const remaining = state.photos.length - start;
+  const analysisSide = remaining > 80 ? 420 : remaining > 40 ? 520 : 720;
+  const detectorSize = remaining > 40 ? 320 : 416;
 
   for (let i = start; i < state.photos.length; i++) {
+    throwIfCancelled();
     const p = state.photos[i];
     setProc(`사진 ${i + 1}/${state.photos.length} 자동 검수 중...`);
     procSub.textContent = p.name;
-    await tick();
-    const frame = makeAnalysisFrame(p);
+    setProcProgress((i - start) / Math.max(1, remaining));
+    await yieldToBrowser();
+    const frame = makeAnalysisFrame(p, analysisSide);
     const corr = computeAutoCorr(frame.imageData, p.environmentOverride);
     const quality = analyzePhotoQuality(frame.imageData);
     let workflowDetections = p.ready ? p.faceDetections : [];
@@ -328,7 +349,7 @@ async function analyzeEventPhotos(start = 0) {
       try {
         workflowDetections = await faceapi.detectAllFaces(
           frame.canvas,
-          new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 }),
+          new faceapi.TinyFaceDetectorOptions({ inputSize: detectorSize, scoreThreshold: 0.32 }),
         ).withFaceLandmarks();
       } catch { workflowDetections = []; }
     }
@@ -338,21 +359,30 @@ async function analyzeEventPhotos(start = 0) {
       p.ready ? p.displayW : frame.imageData.width,
       p.ready ? p.displayH : frame.imageData.height,
     );
-    const issues = [];
-    if (quality.focusScore < 8) issues.push('초점이 흐릴 수 있음');
-    if (corr.stats.median < 48) issues.push('사진이 많이 어두움');
-    if (corr.stats.median > 208) issues.push('사진이 너무 밝음');
-    if (corr.stats.clippedBright > 0.035) issues.push('밝은 부분 손실');
-    if (corr.stats.clippedDark > 0.055) issues.push('어두운 부분 손실');
-    if (faceChecks.closedEyes > 0) issues.push(`눈 감은 얼굴 ${faceChecks.closedEyes}명`);
-    if (faceChecks.edgeFaces > 0) issues.push('가장자리 얼굴 잘림 확인');
+    const verdict = evaluateQualitySignals({
+      focusScore: quality.focusScore,
+      median: corr.stats.median,
+      clippedBright: corr.stats.clippedBright,
+      clippedDark: corr.stats.clippedDark,
+    });
+    if (faceChecks.closedEyes > 0) verdict.details.push({
+      code: 'closed_eyes', label: `눈 감은 얼굴 ${faceChecks.closedEyes}명`, confidence: 0.82, penalty: 24,
+    });
+    if (faceChecks.edgeFaces > 0) verdict.details.push({
+      code: 'edge_face', label: '가장자리 얼굴 잘림 확인', confidence: 0.78, penalty: 12,
+    });
+    verdict.score = Math.max(0, 100 - verdict.details.reduce((sum, item) => sum + item.penalty, 0));
+    verdict.confidence = verdict.details.length ? Math.max(...verdict.details.map(item => item.confidence)) : 0.9;
     p.workflow = {
       ...quality,
       corr,
       faceCount,
       hash: createDifferenceHash(frame.imageData),
       aspect: frame.imageData.width / frame.imageData.height,
-      issues,
+      issues: verdict.details.map(item => item.label),
+      issueDetails: verdict.details,
+      qualityScore: verdict.score,
+      confidence: verdict.confidence,
       duplicateOf: null,
     };
   }
@@ -374,6 +404,7 @@ async function analyzeEventPhotos(start = 0) {
     updateAnalysisUI(active);
     applyProcessing();
   }
+  setProcProgress(1);
   hideProc();
 }
 
@@ -385,18 +416,21 @@ function classifyDuplicatesAndGroups() {
     if (!w) return;
     for (let j = 0; j < i; j++) {
       const other = state.photos[j].workflow;
-      if (!other || Math.abs(other.aspect - w.aspect) > 0.08) continue;
-      if (hashDistance(other.hash, w.hash) <= 5) {
+      if (!other) continue;
+      if (isDuplicateCandidate(other, w)) {
         w.duplicateOf = j;
         w.issues.push(`${j + 1}번과 유사한 사진`);
+        w.issueDetails.push({ code: 'duplicate', label: `${j + 1}번과 유사한 사진`, confidence: 0.9, penalty: 30 });
+        w.qualityScore = Math.max(0, w.qualityScore - 30);
+        w.confidence = Math.max(w.confidence, 0.9);
         break;
       }
     }
     if (previous) {
-      const colorDistance = Math.sqrt(w.avgColor.reduce((sum, value, c) => sum + Math.pow(value - previous.avgColor[c], 2), 0));
+      const sceneColorDistance = colorDistance(w.avgColor, previous.avgColor);
       const sameEnvironment = w.corr.environment === previous.corr.environment;
       const samePeopleType = (w.faceCount >= 3) === (previous.faceCount >= 3);
-      if (!sameEnvironment || !samePeopleType || colorDistance > 48) group++;
+      if (!sameEnvironment || !samePeopleType || sceneColorDistance > 48) group++;
     }
     p.eventGroup = group;
     previous = w;
@@ -762,9 +796,12 @@ function updateWorkflowUI() {
     if (el) el.textContent = value;
   });
   const groups = new Set(state.photos.map(p => p.eventGroup).filter(Boolean)).size;
-  $('workflow-summary').textContent = counts.review || counts.duplicate
+  const validated = state.photos.filter(p => p.validationResult).length;
+  const correct = state.photos.filter(p => p.validationResult === 'correct').length;
+  const accuracy = validated ? ` · 선별 검증 ${correct}/${validated} (${Math.round(correct / validated * 100)}%)` : '';
+  $('workflow-summary').textContent = (counts.review || counts.duplicate
     ? `${groups}개 촬영 묶음 · 확인할 사진 ${counts.review + counts.duplicate}장`
-    : `${groups}개 촬영 묶음 · 모든 사진 자동 검수 완료`;
+    : `${groups}개 촬영 묶음 · 모든 사진 자동 검수 완료`) + accuracy;
 }
 
 function updateReviewUI(p) {
@@ -773,14 +810,19 @@ function updateReviewUI(p) {
     $('review-detail').textContent = '초점, 노출, 중복 여부를 자동으로 확인합니다.';
     $('event-group-label').textContent = '촬영 묶음 분석 중';
     $('review-approve-btn').disabled = true;
+    $('review-reject-btn').disabled = true;
     return;
   }
   const status = getPhotoReviewState(p);
   $('event-group-label').textContent = `촬영 묶음 ${p.eventGroup} · 색감 통일 적용`;
   $('review-status').textContent = status === 'good' ? '검수 완료' : status === 'duplicate' ? '중복 후보' : '확인 필요';
-  $('review-detail').textContent = p.workflow.issues.length ? p.workflow.issues.join(' · ') : '초점과 노출이 양호합니다.';
+  const confidence = Math.round((p.workflow.confidence || 0) * 100);
+  const resultText = p.workflow.issues.length ? p.workflow.issues.join(' · ') : '초점과 노출이 양호합니다.';
+  $('review-detail').textContent = `${resultText} · 자동 판단 ${confidence}% · 품질 ${p.workflow.qualityScore}점`;
   $('review-approve-btn').disabled = false;
-  $('review-approve-btn').textContent = p.reviewApproved ? '확인 완료됨' : '이 사진 확인 완료';
+  $('review-reject-btn').disabled = false;
+  $('review-approve-btn').textContent = p.validationResult === 'correct' ? '맞음으로 기록됨' : '자동 판단 맞음';
+  $('review-reject-btn').textContent = p.validationResult === 'incorrect' ? '틀림으로 기록됨' : '판단이 틀림';
   $('review-card').classList.toggle('needs-review', status === 'review' || status === 'duplicate');
 }
 
@@ -1409,6 +1451,7 @@ $('review-approve-btn').addEventListener('click', () => {
   const p = state.photos[state.activeIdx];
   if (!p?.workflow) return;
   p.reviewApproved = true;
+  p.validationResult = 'correct';
   updateReviewUI(p);
   renderThumbs();
   updateWorkflowUI();
@@ -1416,6 +1459,17 @@ $('review-approve-btn').addEventListener('click', () => {
     const next = state.photos.findIndex((photo, idx) => idx !== state.activeIdx && matchesReviewFilter(photo));
     if (next >= 0) setActive(next);
   }
+});
+
+$('review-reject-btn').addEventListener('click', () => {
+  const p = state.photos[state.activeIdx];
+  if (!p?.workflow) return;
+  p.validationResult = 'incorrect';
+  p.reviewApproved = false;
+  updateReviewUI(p);
+  renderThumbs();
+  updateWorkflowUI();
+  showToast('오판으로 기록했습니다. 이 결과는 선별 기준 조정에 사용할 수 있습니다.', 'info');
 });
 
 $('apply-all-btn').addEventListener('click', () => {
@@ -1495,9 +1549,17 @@ async function exportPhoto(idx) {
   await tick();
   try {
     await ensurePhotoAnalysis(idx);
+    throwIfCancelled();
     const result = await buildPhotoBlob(idx);
     downloadBlob(result.blob, result.filename);
+    if (state.photos[idx].exportDownscaled) {
+      showToast('브라우저 안정성을 위해 매우 큰 원본은 장축 6500px 이내로 저장했습니다.', 'info');
+    }
   } catch (e) {
+    if (e.name === 'AbortError') {
+      showToast('저장 작업을 중지했습니다.', 'info');
+      return;
+    }
     console.error(e);
     showToast('사진을 저장하지 못했습니다. 사진 크기를 줄여 다시 시도해주세요.');
   } finally {
@@ -1553,13 +1615,42 @@ async function buildPhotoBlob(idx) {
   const oW = swap ? source.h : source.w;
   const oH = swap ? source.w : source.h;
   const params = p.params;
+  const target = getPrintTarget(p);
+  let workW, workH, sourceCrop = null;
+  if (target) {
+    workW = target.w; workH = target.h;
+    sourceCrop = calculateCropRect(oW, oH, target.w, target.h, p.crop);
+  } else {
+    const safe = getSafeExportDimensions(oW, oH, MAX_EXPORT_PIXELS, MAX_EXPORT_EDGE);
+    workW = safe.width;
+    workH = safe.height;
+    p.exportDownscaled = safe.scale < 0.999;
+  }
 
-  const fc = Object.assign(document.createElement('canvas'), { width: oW, height: oH });
+  const fc = Object.assign(document.createElement('canvas'), { width: workW, height: workH });
   const fx = fc.getContext('2d', { willReadFrequently: true });
-  drawImageOriented(fx, img, o, oW, oH);
+  if (target && o === 1) {
+    fx.drawImage(img, sourceCrop.sx, sourceCrop.sy, sourceCrop.sw, sourceCrop.sh, 0, 0, workW, workH);
+  } else if (target) {
+    const safe = getSafeExportDimensions(oW, oH, MAX_EXPORT_PIXELS, MAX_EXPORT_EDGE);
+    const safeScale = safe.scale;
+    const safeW = safe.width;
+    const safeH = safe.height;
+    const oriented = Object.assign(document.createElement('canvas'), { width: safeW, height: safeH });
+    drawImageOriented(oriented.getContext('2d'), img, o, safeW, safeH);
+    fx.drawImage(
+      oriented,
+      sourceCrop.sx * safeScale, sourceCrop.sy * safeScale,
+      sourceCrop.sw * safeScale, sourceCrop.sh * safeScale,
+      0, 0, workW, workH,
+    );
+    oriented.width = 1; oriented.height = 1;
+  } else {
+    drawImageOriented(fx, img, o, workW, workH);
+  }
 
   // reuse autoCorr computed at display size — statistically equivalent
-  const id = fx.getImageData(0, 0, oW, oH);
+  const id = fx.getImageData(0, 0, workW, workH);
   const d  = id.data;
   applySmartAuto(d, p.autoCorr, params.autoStrength);
   applyBCS(d, params.brightness, params.contrast, params.saturation);
@@ -1569,35 +1660,40 @@ async function buildPhotoBlob(idx) {
 
   let scaledDetections = [];
   if (p.faceDetections.length > 0) {
-    const sx = oW / p.displayW, sy = oH / p.displayH;
+    const sourceScaleX = oW / p.displayW, sourceScaleY = oH / p.displayH;
     scaledDetections = p.faceDetections.map(det => ({
       ...det,
-      landmarks: { positions: det.landmarks.positions.map(pt => ({ x: pt.x * sx, y: pt.y * sy })) },
+      landmarks: { positions: det.landmarks.positions.map(pt => {
+        const sourceX = pt.x * sourceScaleX, sourceY = pt.y * sourceScaleY;
+        return target
+          ? { x: (sourceX - sourceCrop.sx) * workW / sourceCrop.sw, y: (sourceY - sourceCrop.sy) * workH / sourceCrop.sh }
+          : { x: sourceX * workW / oW, y: sourceY * workH / oH };
+      }) },
     }));
   }
 
   if (scaledDetections.length && params.autoStrength > 0) {
-    autoFaceLight(fx, oW, oH, scaledDetections, p.faceAdjustments, params.autoStrength / 100);
+    autoFaceLight(fx, workW, workH, scaledDetections, p.faceAdjustments, params.autoStrength / 100);
   }
 
   const autoNoise = p.autoCorr.autoNoiseReduction * (params.autoStrength / 100);
   const noiseReduction = Math.max(params.noiseReduction, autoNoise);
-  if (noiseReduction > 0) applyNoiseReduction(fx, oW, oH, noiseReduction / 100);
-  if (params.clarity > 0)        applyClarity(fx, oW, oH, params.clarity);
-  if (params.sharpness > 0)      unsharpMask(fx, oW, oH, params.sharpness / 100);
+  if (noiseReduction > 0) applyNoiseReduction(fx, workW, workH, noiseReduction / 100);
+  if (params.clarity > 0)        applyClarity(fx, workW, workH, params.clarity);
+  if (params.sharpness > 0)      unsharpMask(fx, workW, workH, params.sharpness / 100);
 
   if (params.skinSmooth > 0) {
-    if (scaledDetections.length) faceSmooth(fx, oW, oH, params.skinSmooth / 100, scaledDetections);
+    if (scaledDetections.length) faceSmooth(fx, workW, workH, params.skinSmooth / 100, scaledDetections);
   }
 
-  const target = getPrintTarget(p);
-  const out = target ? resizeForPrint(fc, target.w, target.h, p.crop) : fc;
+  const out = fc;
   if (target) unsharpMask(out.getContext('2d', { willReadFrequently: true }), out.width, out.height, 0.035);
 
   const fmt  = $('format-select').value;
   const qual = +$('quality').value / 100;
   const mime = fmt === 'png' ? 'image/png' : 'image/jpeg';
   const blob = await canvasToBlob(out, mime, qual);
+  out.width = 1; out.height = 1;
   const ext  = fmt === 'png' ? 'png' : 'jpg';
   const base = p.name.replace(/\.[^.]+$/, '');
   return { blob, filename: `${base}_retouched_${state.selectedSize}.${ext}` };
@@ -1612,28 +1708,53 @@ async function exportAll() {
   const total = state.photos.length;
   showProc('전체 사진 자동 처리 중...', `0 / ${total}장`);
   await tick();
-  const zip = new JSZip();
+  let zip = new JSZip();
+  let zipBytes = 0, zipCount = 0, chunkStart = 0, chunkNumber = 1;
+
+  async function flushZip(endExclusive, finalChunk) {
+    if (!zipCount) return;
+    throwIfCancelled();
+    const currentZip = zip;
+    setProc(`ZIP 파일 만드는 중... ${chunkNumber}번째 묶음`);
+    const blob = await currentZip.generateAsync(
+      { type: 'blob', compression: 'STORE', streamFiles: true },
+      info => {
+        setProcProgress((endExclusive - 1 + info.percent / 100) / total);
+        procSub.textContent = `${chunkStart + 1}~${endExclusive}번 사진 묶는 중`;
+      },
+    );
+    const singleChunk = chunkNumber === 1 && finalChunk;
+    const suffix = singleChunk ? '' : `_part${chunkNumber}_${chunkStart + 1}-${endExclusive}`;
+    downloadBlob(blob, `AutoRetouch_${total}장_${state.selectedSize}${suffix}.zip`);
+    zip = new JSZip();
+    zipBytes = 0; zipCount = 0; chunkStart = endExclusive; chunkNumber++;
+    await yieldToBrowser();
+  }
 
   try {
     for (let i = 0; i < total; i++) {
+      throwIfCancelled();
       setProc('사진별 자동 보정 중...');
       procSub.textContent = `${i + 1} / ${total}장 — ${state.photos[i].name}`;
-      await tick();
+      setProcProgress(i / total);
+      await yieldToBrowser();
       await ensurePhotoAnalysis(i);
       const result = await buildPhotoBlob(i);
+      if (shouldFlushZip(zipBytes, result.blob.size, zipCount, ZIP_CHUNK_BYTES)) await flushZip(i, false);
       zip.file(result.filename, result.blob);
+      zipBytes += result.blob.size;
+      zipCount++;
     }
 
-    const blob = await zip.generateAsync(
-      { type: 'blob', compression: 'STORE' },
-      info => {
-        setProc(`ZIP 파일 만드는 중... ${Math.round(info.percent)}%`);
-        procSub.textContent = `${total}장 묶는 중`;
-      },
-    );
-    downloadBlob(blob, `AutoRetouch_${total}장_${state.selectedSize}.zip`);
-    showToast(`${total}장을 ZIP 파일로 저장했습니다.`, 'info');
+    await flushZip(total, true);
+    setProcProgress(1);
+    const parts = chunkNumber - 1;
+    showToast(parts > 1 ? `${total}장을 ${parts}개 ZIP으로 안전하게 나눠 저장했습니다.` : `${total}장을 ZIP 파일로 저장했습니다.`, 'info');
   } catch (e) {
+    if (e.name === 'AbortError') {
+      showToast('전체 저장을 중지했습니다. 이미 저장된 ZIP은 사용할 수 있습니다.', 'info');
+      return;
+    }
     console.error(e);
     showToast('전체 사진 저장에 실패했습니다. 사진 수를 줄여 다시 시도해주세요.');
   } finally {
@@ -1667,10 +1788,35 @@ function downloadBlob(blob, filename) {
 // ── Utilities ─────────────────────────────────────────────────
 const clamp = v => Math.max(0, Math.min(255, Math.round(v)));
 const tick  = () => new Promise(r => setTimeout(r, 30));
+const yieldToBrowser = () => new Promise(resolve => {
+  if ('requestIdleCallback' in window) window.requestIdleCallback(resolve, { timeout: 60 });
+  else setTimeout(resolve, 0);
+});
 
-function showProc(msg, sub = '') { procText.textContent = msg; procSub.textContent = sub; procOverlay.classList.remove('hidden'); }
+function showProc(msg, sub = '') {
+  state.cancelRequested = false;
+  procText.textContent = msg;
+  procSub.textContent = sub;
+  procCancel.disabled = false;
+  procCancel.textContent = '작업 중지';
+  setProcProgress(0);
+  procOverlay.classList.remove('hidden');
+}
 function setProc(msg)  { procText.textContent = msg; }
 function hideProc()    { procOverlay.classList.add('hidden'); }
+function setProcProgress(value) { procProgress.style.width = `${Math.max(0, Math.min(1, value)) * 100}%`; }
+function throwIfCancelled() {
+  if (!state.cancelRequested) return;
+  const error = new Error('Operation cancelled');
+  error.name = 'AbortError';
+  throw error;
+}
+
+procCancel.addEventListener('click', () => {
+  state.cancelRequested = true;
+  procCancel.disabled = true;
+  procCancel.textContent = '중지하는 중...';
+});
 
 function showToast(msg, type = 'error') {
   const container = $('toast-container');

@@ -482,6 +482,9 @@ header p {
   cursor: pointer;
 }
 
+.review-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem; }
+.btn-review-secondary { color: var(--text-muted); background: transparent; }
+
 .btn-review:hover { border-color: var(--accent); }
 .btn-review:disabled { opacity: 0.45; cursor: default; }
 
@@ -860,6 +863,36 @@ select {
   color: var(--text-dim);
   margin-top: -0.5rem;
 }
+
+.processing-progress {
+  width: min(320px, 72vw);
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface3);
+}
+
+.processing-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.btn-cancel-processing {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.5rem 0.9rem;
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.btn-cancel-processing:hover { color: white; border-color: var(--text-muted); }
+.btn-cancel-processing:disabled { opacity: 0.5; cursor: default; }
 
 .raw-note {
   color: var(--text-dim);

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AutoRetouch — 자동 사진 보정</title>
-  <link rel="stylesheet" href="style.css?v=5">
+  <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
   <header>
@@ -40,6 +40,8 @@
         <div class="spinner"></div>
         <p id="processing-text">사진 분석 중...</p>
         <p id="processing-sub" class="processing-sub"></p>
+        <div class="processing-progress" aria-hidden="true"><span id="processing-progress-bar"></span></div>
+        <button id="processing-cancel" class="btn-cancel-processing">작업 중지</button>
       </div>
 
       <!-- Left: Comparison + Thumbnail Strip -->
@@ -98,7 +100,10 @@
             <span id="event-group-label">촬영 묶음 분석 중</span>
           </div>
           <p id="review-detail">초점, 노출, 중복 여부를 자동으로 확인합니다.</p>
-          <button class="btn-review" id="review-approve-btn">이 사진 확인 완료</button>
+          <div class="review-actions">
+            <button class="btn-review" id="review-approve-btn">자동 판단 맞음</button>
+            <button class="btn-review btn-review-secondary" id="review-reject-btn">판단이 틀림</button>
+          </div>
         </div>
 
         <!-- Auto Retouch -->
@@ -280,6 +285,7 @@
 
   <script src="vendor/face-api.min.js"></script>
   <script src="vendor/jszip.min.js"></script>
-  <script src="app.js?v=5"></script>
+  <script src="selection-engine.js?v=1"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
