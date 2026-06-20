@@ -71,32 +71,23 @@
   }
 
   function buildDuplicateGroups(items) {
-    const parents = items.map((_, index) => index);
-    const find = index => {
-      while (parents[index] !== index) {
-        parents[index] = parents[parents[index]];
-        index = parents[index];
-      }
-      return index;
-    };
-    const union = (a, b) => {
-      const rootA = find(a), rootB = find(b);
-      if (rootA !== rootB) parents[rootB] = rootA;
-    };
-    for (let i = 0; i < items.length; i++) {
-      if (!items[i]) continue;
-      for (let j = 0; j < i; j++) {
-        if (items[j] && isDuplicateCandidate(items[j], items[i])) union(j, i);
-      }
-    }
-    const groups = new Map();
+    const groups = [];
     items.forEach((item, index) => {
       if (!item) return;
-      const root = find(index);
-      if (!groups.has(root)) groups.set(root, []);
-      groups.get(root).push(index);
+      const group = groups.find(indices => isDuplicateCandidate(items[indices[0]], item));
+      if (group) group.push(index);
+      else groups.push([index]);
     });
-    return Array.from(groups.values()).filter(group => group.length > 1);
+    return groups.filter(group => group.length > 1);
+  }
+
+  function duplicateConfidence(a, b) {
+    if (!isDuplicateCandidate(a, b)) return 0;
+    const distance = hashDistance(a.hash, b.hash);
+    const hashScore = 1 - Math.min(1, distance / 8);
+    const colorScore = 1 - Math.min(1, colorDistance(a.avgColor, b.avgColor) / 22);
+    const aspectScore = 1 - Math.min(1, Math.abs(a.aspect - b.aspect) / 0.06);
+    return Math.max(0, Math.min(1, hashScore * 0.65 + colorScore * 0.25 + aspectScore * 0.1));
   }
 
   function classifyTouchGesture(deltaX, deltaY, threshold = 7, bias = 1.15) {
@@ -115,6 +106,7 @@
     shouldFlushZip,
     rankPhotoForExport,
     buildDuplicateGroups,
+    duplicateConfidence,
     classifyTouchGesture,
   });
 });

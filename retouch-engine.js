@@ -154,6 +154,41 @@
     return Math.max(-limit, Math.min(limit, detail)) * strength * gain * tonalProtection * noiseProtection;
   }
 
+  function deriveAutoTone(stats, environment = 'unknown', features = {}) {
+    const median = stats.median ?? 128;
+    const p05 = stats.p05 ?? 20;
+    const p10 = stats.p10 ?? p05;
+    const p95 = stats.p95 ?? 235;
+    const p99 = stats.p99 ?? p95;
+    const dynamicRange = stats.dynamicRange ?? (p95 - p05);
+    const clippedBright = stats.clippedBright || 0;
+    const noiseScore = features.noiseScore || 0;
+    const skyRatio = features.skyRatio || 0;
+
+    let exposureEV = 0;
+    if (median < 62 && p95 < 238) {
+      exposureEV = Math.min(0.38, Math.log2(92 / Math.max(20, median)) * 0.38);
+    } else if (median < 88 && p95 < 222) {
+      exposureEV = Math.min(0.2, Math.log2(94 / Math.max(35, median)) * 0.28);
+    } else if (median > 195 && p05 > 22) {
+      exposureEV = Math.max(-0.22, Math.log2(172 / median) * 0.34);
+    }
+
+    const shadowLimit = environment === 'indoor' ? 12 : 9;
+    let shadowLift = median < 128 && p10 < 28
+      ? Math.min(shadowLimit, (28 - p10) * (environment === 'indoor' ? 0.48 : 0.38)) : 0;
+    if (exposureEV > 0.14) shadowLift *= 0.55;
+
+    let highlightCompression = 0;
+    if (p99 > 248 && (clippedBright > 0.004 || skyRatio > 0.06)) {
+      highlightCompression = Math.min(0.13, 0.045 + (p99 - 248) * 0.009 + clippedBright * 1.5);
+    }
+
+    const contrastBoost = dynamicRange < 112 && noiseScore < 8.5
+      ? Math.min(0.085, (112 - dynamicRange) / 620) : 0;
+    return { exposureEV, shadowLift, highlightCompression, contrastBoost };
+  }
+
   return Object.freeze({
     luminance,
     transformLuminance,
@@ -163,6 +198,7 @@
     getLocalLiftWeight,
     applyTonalAdjustmentsPixel,
     computeDetailDelta,
+    deriveAutoTone,
     fitGamut,
   });
 });

@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const {
   evaluateQualitySignals, isDuplicateCandidate, getSafeExportDimensions, shouldFlushZip,
-  rankPhotoForExport, buildDuplicateGroups, classifyTouchGesture,
+  rankPhotoForExport, buildDuplicateGroups, duplicateConfidence, classifyTouchGesture,
 } = require('../selection-engine.js');
 
 const codes = metrics => evaluateQualitySignals(metrics).details.map(item => item.code);
@@ -38,9 +38,17 @@ const duplicateGroups = buildDuplicateGroups([
   { ...base, hash: '1'.repeat(64), avgColor: [30, 40, 50] },
 ]);
 assert.deepEqual(duplicateGroups, [[0, 1]]);
+const chainGroups = buildDuplicateGroups([
+  base,
+  { ...base, hash: `${'1'.repeat(5)}${'0'.repeat(59)}` },
+  { ...base, hash: `${'1'.repeat(10)}${'0'.repeat(54)}` },
+]);
+assert.deepEqual(chainGroups, [[0, 1]]);
+assert.ok(duplicateConfidence(base, { ...base, hash: `${'0'.repeat(62)}11` }) > 0.72);
+assert.ok(duplicateConfidence(base, { ...base, hash: `${'1'.repeat(5)}${'0'.repeat(59)}`, avgColor: [138, 126, 116] }) < 0.72);
 assert.equal(classifyTouchGesture(2, 3), 'pending');
 assert.equal(classifyTouchGesture(4, 18), 'vertical');
 assert.equal(classifyTouchGesture(20, 3), 'horizontal');
 assert.equal(classifyTouchGesture(10, 10), 'ambiguous');
 
-console.log('selection-engine: 16 checks passed');
+console.log('selection-engine: 19 checks passed');

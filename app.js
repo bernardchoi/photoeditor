@@ -15,13 +15,13 @@ const MAX_EXPORT_EDGE = 6500;
 const ZIP_CHUNK_BYTES = 120 * 1024 * 1024;
 const {
   evaluateQualitySignals, colorDistance, getSafeExportDimensions, shouldFlushZip,
-  rankPhotoForExport, buildDuplicateGroups, classifyTouchGesture,
+  rankPhotoForExport, buildDuplicateGroups, duplicateConfidence, classifyTouchGesture,
 } = window.SelectionEngine;
 window.AutoRetouchDiagnostics = window.SelectionEngine;
 const {
   luminance, transformLuminance, applySmartPixel, adjustLuminancePixel,
   applyBasicAdjustmentsPixel, getLocalLiftWeight, applyTonalAdjustmentsPixel,
-  computeDetailDelta,
+  computeDetailDelta, deriveAutoTone,
 } = window.RetouchEngine;
 const {
   createPhotoSnapshot, applyPhotoSnapshot, replaceFiles: storeProjectFiles,
@@ -180,7 +180,18 @@ async function addMoreFiles(files) {
 async function loadImages(files, isFirst, options = {}) {
   showProc('사진 불러오는 중...', '');
   const start = state.photos.length;
-  const images = await Promise.all(files.map(loadImageFile));
+  const deviceMemory = navigator.deviceMemory || 4;
+  const concurrency = window.innerWidth <= 768 || deviceMemory <= 4 ? 2 : 3;
+  let decodedCount = 0;
+  const images = await mapWithConcurrency(files, concurrency, async file => {
+    const image = await loadImageFile(file);
+    decodedCount++;
+    procSub.textContent = `${decodedCount} / ${files.length}장 디코딩`;
+    await yieldToBrowser();
+    return image;
+  });
+  const failedCount = images.filter(image => !image).length;
+  if (failedCount) showToast(`${failedCount}장은 형식을 읽지 못해 제외했습니다.`);
 
   images.forEach((img, i) => {
     if (!img) return;
@@ -239,6 +250,19 @@ async function loadImages(files, isFirst, options = {}) {
   }
   await saveProjectState();
   hideProc();
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const run = async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await worker(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, run));
+  return results;
 }
 
 async function loadImageFile(file) {
@@ -483,13 +507,16 @@ function classifyDuplicatesAndGroups() {
       const p = state.photos[index];
       const w = workflows[index];
       w.duplicateOf = bestIdx;
-      const label = `${bestIdx + 1}번이 더 좋은 추천 사진`;
-      w.issueDetails.push({ code: 'duplicate', label, confidence: 0.92, penalty: 30 });
+      const similarityConfidence = duplicateConfidence(workflows[bestIdx], w);
+      const label = similarityConfidence >= 0.72
+        ? `${bestIdx + 1}번이 더 좋은 추천 사진`
+        : `${bestIdx + 1}번과 유사한 사진 확인`;
+      w.issueDetails.push({ code: 'duplicate', label, confidence: similarityConfidence, penalty: 30 });
       w.issues = w.issueDetails.map(item => item.label);
       w.qualityScore = Math.max(0, w.baseQualityScore - 30);
-      w.confidence = Math.max(w.confidence, 0.92);
-      p.autoExcluded = true;
-      if (!p.selectionManual) p.exportIncluded = false;
+      w.confidence = Math.max(w.confidence, similarityConfidence);
+      p.autoExcluded = similarityConfidence >= 0.72;
+      if (!p.selectionManual) p.exportIncluded = !p.autoExcluded;
     });
   });
 }
@@ -962,15 +989,9 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
     return 255;
   }
 
-  const p05 = percentile(0.05), median = percentile(0.5), p95 = percentile(0.95), p99 = percentile(0.99);
-  let exposureEV = 0;
-  if (median < 68) exposureEV = Math.min(0.45, Math.log2(92 / Math.max(20, median)) * 0.45);
-  else if (median > 188) exposureEV = Math.max(-0.3, Math.log2(168 / median) * 0.4);
-
+  const p05 = percentile(0.05), p10 = percentile(0.1), median = percentile(0.5);
+  const p95 = percentile(0.95), p99 = percentile(0.99);
   const dynamicRange = p95 - p05;
-  let shadowLift = median < 108 && p05 < 12 ? Math.min(14, (12 - p05) * 0.8) : 0;
-  let highlightCompression = p99 > 251 && clippedBright / n > 0.015 ? 0.1 : 0;
-  const contrastBoost = dynamicRange < 105 ? Math.min(0.1, (105 - dynamicRange) / 500) : 0;
 
   let rawWB = [1, 1, 1], wbCandidate = false, wbConfidence = 0;
   if (neutralCount > n * 0.008) {
@@ -1004,6 +1025,11 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
   else if (indoorScore > 0.48 && indoorScore - outdoorScore > 0.18) environment = 'indoor';
   const environmentConfidence = environmentOverride !== 'auto'
     ? 1 : Math.min(1, Math.abs(outdoorScore - indoorScore) / 1.2);
+  const tone = deriveAutoTone({
+    p05, p10, median, p95, p99, dynamicRange,
+    clippedDark: clippedDark / n, clippedBright: clippedBright / n,
+  }, environment, features);
+  let { exposureEV, shadowLift, highlightCompression, contrastBoost } = tone;
 
   let wb = [1, 1, 1], wbApplied = false;
   if (wbCandidate) {
@@ -1016,10 +1042,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
   const vibrance = features.averageSaturation < 0.18
     ? Math.min(6, (0.18 - features.averageSaturation) * 45) : 0;
   if (environment === 'indoor') {
-    if (median < 125 && p05 < 18) shadowLift = Math.max(shadowLift, Math.min(12, (18 - p05) * 0.4));
     if (features.noiseScore > 6) autoNoiseReduction = Math.min(18, (features.noiseScore - 5) * 2.5);
-  } else if (environment === 'outdoor' && features.skyRatio > 0.08 && p99 > 245) {
-    highlightCompression = Math.max(highlightCompression, 0.06);
   }
 
   const correction = {
@@ -1027,7 +1050,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
     environment, environmentConfidence, environmentSource: environmentOverride === 'auto' ? 'auto' : 'manual',
     autoNoiseReduction, features,
     needsTone: Math.abs(exposureEV) > 0.01 || shadowLift > 0 || highlightCompression > 0 || contrastBoost > 0,
-    stats: { p05, median, p95, p99, dynamicRange, clippedDark: clippedDark / n, clippedBright: clippedBright / n },
+    stats: { p05, p10, median, p95, p99, dynamicRange, clippedDark: clippedDark / n, clippedBright: clippedBright / n },
     guardScale: 1,
   };
   correction.guardScale = evaluateCorrectionSafety(d, correction);

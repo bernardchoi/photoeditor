@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const {
   luminance, transformLuminance, applySmartPixel, adjustLuminancePixel,
   applyBasicAdjustmentsPixel, getLocalLiftWeight, applyTonalAdjustmentsPixel,
-  computeDetailDelta,
+  computeDetailDelta, deriveAutoTone,
 } = require('../retouch-engine.js');
 
 const identity = { exposureEV: 0, shadowLift: 0, highlightCompression: 0, contrastBoost: 0, wb: [1, 1, 1], wbConfidence: 1 };
@@ -59,6 +59,27 @@ assert.ok(recoveredShadow[0] > 55);
 const protectedHighlight = applyTonalAdjustmentsPixel(220, 220, 220, 60, 0);
 assert.ok(protectedHighlight[0] < 220 && protectedHighlight[0] > 180);
 assert.ok(Math.abs(computeDetailDelta(45, 10, 0.7, 12)) < Math.abs(computeDetailDelta(120, 10, 0.7, 2)));
+
+const balancedTone = deriveAutoTone(
+  { p05: 24, p10: 36, median: 128, p95: 230, p99: 242, dynamicRange: 206, clippedBright: 0.001 },
+  'unknown', { noiseScore: 3, skyRatio: 0 },
+);
+assert.deepEqual(balancedTone, { exposureEV: 0, shadowLift: 0, highlightCompression: 0, contrastBoost: 0 });
+const darkIndoorTone = deriveAutoTone(
+  { p05: 3, p10: 10, median: 55, p95: 185, p99: 220, dynamicRange: 182, clippedBright: 0 },
+  'indoor', { noiseScore: 7, skyRatio: 0 },
+);
+assert.ok(darkIndoorTone.exposureEV > 0 && darkIndoorTone.shadowLift > 0);
+const brightOutdoorTone = deriveAutoTone(
+  { p05: 18, p10: 30, median: 150, p95: 247, p99: 254, dynamicRange: 229, clippedBright: 0.02 },
+  'outdoor', { noiseScore: 2, skyRatio: 0.2 },
+);
+assert.ok(brightOutdoorTone.highlightCompression > 0);
+const flatTone = deriveAutoTone(
+  { p05: 70, p10: 80, median: 128, p95: 170, p99: 185, dynamicRange: 100, clippedBright: 0 },
+  'unknown', { noiseScore: 2, skyRatio: 0 },
+);
+assert.ok(flatTone.contrastBoost > 0);
 
 for (const contrast of [-100, -40, 40, 100]) {
   let previous = -1;
