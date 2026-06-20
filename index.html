@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AutoRetouch — 자동 사진 보정</title>
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=9">
 </head>
 <body>
   <header>
@@ -93,7 +93,7 @@
       <!-- Controls (desktop: sidebar / mobile: bottom sheet) -->
       <aside class="controls-panel" id="controls-panel">
         <!-- Mobile drag handle -->
-        <div class="panel-handle" id="panel-handle">
+        <div class="panel-handle" id="panel-handle" role="button" tabindex="0" aria-expanded="false" aria-controls="controls-panel">
           <div class="handle-bar"></div>
           <span class="handle-label">보정 설정</span>
           <span class="handle-chevron" id="handle-chevron">▲</span>
@@ -294,6 +294,13 @@
           <button class="btn-reset" id="reset-btn">처음부터</button>
         </div>
       </aside>
+      <div class="sheet-backdrop" id="sheet-backdrop" aria-hidden="true"></div>
+      <nav class="mobile-action-dock" aria-label="빠른 사진 작업">
+        <button id="mobile-download-btn" class="mobile-action-primary">현재 저장</button>
+        <button id="mobile-download-all-btn">선택 ZIP <span id="mobile-total-count">0</span></button>
+        <button id="mobile-add-btn">사진 추가</button>
+        <button id="mobile-reset-btn">새 작업</button>
+      </nav>
     </section>
   </main>
 
@@ -302,9 +309,9 @@
 
   <script src="vendor/face-api.min.js"></script>
   <script src="vendor/jszip.min.js"></script>
-  <script src="selection-engine.js?v=2"></script>
-  <script src="retouch-engine.js?v=2"></script>
+  <script src="selection-engine.js?v=3"></script>
+  <script src="retouch-engine.js?v=3"></script>
   <script src="project-store.js?v=1"></script>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=12"></script>
 </body>
 </html>

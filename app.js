@@ -15,12 +15,13 @@ const MAX_EXPORT_EDGE = 6500;
 const ZIP_CHUNK_BYTES = 120 * 1024 * 1024;
 const {
   evaluateQualitySignals, colorDistance, getSafeExportDimensions, shouldFlushZip,
-  rankPhotoForExport, buildDuplicateGroups,
+  rankPhotoForExport, buildDuplicateGroups, classifyTouchGesture,
 } = window.SelectionEngine;
 window.AutoRetouchDiagnostics = window.SelectionEngine;
 const {
   luminance, transformLuminance, applySmartPixel, adjustLuminancePixel,
-  applyBasicAdjustmentsPixel, getLocalLiftWeight,
+  applyBasicAdjustmentsPixel, getLocalLiftWeight, applyTonalAdjustmentsPixel,
+  computeDetailDelta,
 } = window.RetouchEngine;
 const {
   createPhotoSnapshot, applyPhotoSnapshot, replaceFiles: storeProjectFiles,
@@ -79,6 +80,9 @@ const thumbStrip    = $('thumb-strip');
 const photoCounter  = $('photo-counter');
 const cropGuide     = $('crop-guide');
 const cropControls  = $('crop-controls');
+const mobileDownloadBtn = $('mobile-download-btn');
+const mobileDownloadAllBtn = $('mobile-download-all-btn');
+const mobileTotalCount = $('mobile-total-count');
 
 // ── Face API ──────────────────────────────────────────────────
 async function loadFaceApi() {
@@ -730,9 +734,9 @@ function analyzeFaceExposure(imageData, detections, globalMedian, environment) {
 function applySceneDefaults(p, force = false) {
   if ((!force && p.paramsCustomized) || !p.autoCorr) return;
   const presets = {
-    general:  { sharpness: 0, skinSmooth: 0 },
-    portrait: { sharpness: 5, skinSmooth: 12 },
-    group:    { sharpness: 5, skinSmooth: 6 },
+    general:  { sharpness: 3, clarity: 2, skinSmooth: 0 },
+    portrait: { sharpness: 4, clarity: 0, skinSmooth: 12 },
+    group:    { sharpness: 5, clarity: 2, skinSmooth: 6 },
   };
   Object.assign(p.params, presets[p.autoCorr.sceneType] || presets.general);
   p.autoDefaultsApplied = true;
@@ -763,6 +767,7 @@ function updateAnalysisUI(p) {
   const changes = [];
   if (corr.needsTone) changes.push('노출');
   if (corr.wbApplied) changes.push(corr.environment === 'indoor' ? '실내 조명색' : '색감');
+  if (corr.vibrance > 0.5) changes.push('저채도 색감');
   if (corr.autoNoiseReduction > 0) changes.push('실내 노이즈');
   if (corr.environment === 'outdoor' && corr.highlightCompression > 0) changes.push('실외 하이라이트');
   if (corr.backlitFaces) changes.push(`어두운 얼굴 ${corr.backlitFaces}명`);
@@ -823,6 +828,8 @@ function renderThumbs() {
   const multi = state.photos.length > 1 && includedCount > 0;
   downloadAllBtn.classList.toggle('hidden', !multi);
   totalCountEl.textContent = includedCount;
+  mobileDownloadAllBtn.disabled = !multi;
+  mobileTotalCount.textContent = includedCount;
   updateCounter();
 }
 
@@ -919,6 +926,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
   let clippedDark = 0, clippedBright = 0;
   let skyPixels = 0, greenPixels = 0, warmPixels = 0;
   let noiseSum = 0, noiseCount = 0;
+  let saturationSum = 0;
 
   for (let i = 0; i < d.length; i += 4) {
     const r = d[i], g = d[i+1], b = d[i+2];
@@ -931,6 +939,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
     if (y >= 253) clippedBright++;
 
     const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+    saturationSum += Math.max(r, g, b) > 0 ? chroma / Math.max(r, g, b) : 0;
     if (y > 35 && y < 225 && chroma < 24) {
       neutralR += r; neutralG += g; neutralB += b; neutralChromaSum += chroma; neutralCount++;
     }
@@ -983,6 +992,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
     greenRatio: greenPixels / n,
     warmRatio: warmPixels / n,
     noiseScore: noiseCount ? noiseSum / noiseCount : 0,
+    averageSaturation: saturationSum / Math.max(1, n),
   };
   const outdoorScore = features.skyRatio * 4 + features.greenRatio * 1.5
     + (dynamicRange > 150 ? 0.2 : 0) + (median > 115 ? 0.15 : 0);
@@ -1003,6 +1013,8 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
   }
 
   let autoNoiseReduction = 0;
+  const vibrance = features.averageSaturation < 0.18
+    ? Math.min(6, (0.18 - features.averageSaturation) * 45) : 0;
   if (environment === 'indoor') {
     if (median < 125 && p05 < 18) shadowLift = Math.max(shadowLift, Math.min(12, (18 - p05) * 0.4));
     if (features.noiseScore > 6) autoNoiseReduction = Math.min(18, (features.noiseScore - 5) * 2.5);
@@ -1011,7 +1023,7 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
   }
 
   const correction = {
-    exposureEV, shadowLift, highlightCompression, contrastBoost, wb, wbApplied, wbConfidence,
+    exposureEV, shadowLift, highlightCompression, contrastBoost, wb, wbApplied, wbConfidence, vibrance,
     environment, environmentConfidence, environmentSource: environmentOverride === 'auto' ? 'auto' : 'manual',
     autoNoiseReduction, features,
     needsTone: Math.abs(exposureEV) > 0.01 || shadowLift > 0 || highlightCompression > 0 || contrastBoost > 0,
@@ -1062,8 +1074,9 @@ function applyProcessing() {
   const autoNoise = p.autoCorr.autoNoiseReduction * (params.autoStrength / 100);
   const noiseReduction = Math.max(params.noiseReduction, autoNoise);
   if (noiseReduction > 0) applyNoiseReduction(ctxAfter, W, H, noiseReduction / 100);
-  if (params.clarity > 0)        applyClarity(ctxAfter, W, H, params.clarity);
-  if (params.sharpness > 0)      unsharpMask(ctxAfter, W, H, params.sharpness / 100);
+  const noiseScore = p.autoCorr.features?.noiseScore || 0;
+  if (params.clarity > 0)        applyClarity(ctxAfter, W, H, params.clarity, noiseScore);
+  if (params.sharpness > 0)      unsharpMask(ctxAfter, W, H, params.sharpness / 100, noiseScore);
   if (params.skinSmooth > 0)     skinSmooth(ctxAfter, W, H, params.skinSmooth / 100, p.faceDetections);
 
   updateClip();
@@ -1110,14 +1123,10 @@ function applyTemperature(d, amount) {
 // ── Highlights / Shadows ──────────────────────────────────────
 function applyHighlightsShadows(d, highlights, shadows) {
   if (!highlights && !shadows) return;
-  const hf = highlights / 100, sf = shadows / 100;
   for (let i = 0; i < d.length; i += 4) {
-    const y = luminance(d[i], d[i+1], d[i+2]);
-    const lum = y / 255;
-    const hw = lum * lum;
-    const sw = (1 - lum) * (1 - lum);
-    const nextY = Math.max(0, Math.min(255, y + sf * 34 * sw - hf * 30 * hw));
-    const corrected = adjustLuminancePixel(d[i], d[i+1], d[i+2], nextY);
+    const corrected = applyTonalAdjustmentsPixel(
+      d[i], d[i+1], d[i+2], highlights, shadows,
+    );
     d[i] = clamp(corrected[0]);
     d[i+1] = clamp(corrected[1]);
     d[i+2] = clamp(corrected[2]);
@@ -1125,7 +1134,7 @@ function applyHighlightsShadows(d, highlights, shadows) {
 }
 
 // ── Clarity (midtone contrast / local contrast) ───────────────
-function applyClarity(ctx, W, H, amount) {
+function applyClarity(ctx, W, H, amount, noiseScore = 0) {
   if (!amount) return;
   const orig = ctx.getImageData(0, 0, W, H);
   const blur = new ImageData(new Uint8ClampedArray(orig.data), W, H);
@@ -1133,15 +1142,12 @@ function applyClarity(ctx, W, H, amount) {
   const r = Math.max(6, Math.round(W / 50));
   boxBlur(blur, r);
   const d = orig.data, b = blur.data;
-  const str = (amount / 100) * 0.7;
+  const str = amount / 100;
   for (let i = 0; i < d.length; i += 4) {
     const y = luminance(d[i], d[i+1], d[i+2]);
     const blurY = luminance(b[i], b[i+1], b[i+2]);
-    const lum = y / 255;
-    const mid = 1 - Math.abs(lum - 0.5) * 2;
-    const w = str * mid;
     const detail = y - blurY;
-    const nextY = y + (Math.abs(detail) > 1.2 ? detail * w : 0);
+    const nextY = y + computeDetailDelta(y, detail, str, noiseScore, 'clarity');
     const corrected = adjustLuminancePixel(d[i], d[i+1], d[i+2], nextY);
     d[i] = clamp(corrected[0]);
     d[i+1] = clamp(corrected[1]);
@@ -1175,19 +1181,16 @@ function applyNoiseReduction(ctx, W, H, amount) {
 }
 
 // ── Sharpening ────────────────────────────────────────────────
-function unsharpMask(ctx, W, H, amount) {
+function unsharpMask(ctx, W, H, amount, noiseScore = 0) {
   const orig = ctx.getImageData(0, 0, W, H);
   const blur = new ImageData(new Uint8ClampedArray(orig.data), W, H);
   boxBlur(blur, 2); boxBlur(blur, 2);
   const d = orig.data, b = blur.data;
-  const str = amount * 1.05;
   for (let i = 0; i < d.length; i += 4) {
     const y = luminance(d[i], d[i+1], d[i+2]);
     const blurY = luminance(b[i], b[i+1], b[i+2]);
     const detail = y - blurY;
-    const threshold = 2 + Math.pow(1 - y / 255, 2) * 4;
-    const safeDetail = Math.max(-18, Math.min(18, detail));
-    const nextY = y + (Math.abs(detail) > threshold ? safeDetail * str : 0);
+    const nextY = y + computeDetailDelta(y, detail, amount, noiseScore, 'sharpen');
     const corrected = adjustLuminancePixel(d[i], d[i+1], d[i+2], nextY);
     d[i] = clamp(corrected[0]);
     d[i+1] = clamp(corrected[1]);
@@ -1347,6 +1350,8 @@ function updateSliderAfterResize() {
 
 (function initSlider() {
   let dragging = false;
+  let touchMode = 'idle';
+  let touchStartX = 0, touchStartY = 0;
   cmpSlider.addEventListener('mousedown', e => { dragging = true; e.preventDefault(); });
   document.addEventListener('mousemove', e => {
     if (!dragging) return;
@@ -1355,14 +1360,35 @@ function updateSliderAfterResize() {
     updateClip();
   });
   document.addEventListener('mouseup', () => { dragging = false; });
-  cmpSlider.addEventListener('touchstart', e => { dragging = true; e.preventDefault(); }, { passive: false });
+  cmpSlider.addEventListener('touchstart', e => {
+    const touch = e.touches[0];
+    touchStartX = touch.clientX;
+    touchStartY = touch.clientY;
+    touchMode = 'pending';
+    dragging = false;
+  }, { passive: true });
   document.addEventListener('touchmove', e => {
+    if (touchMode === 'idle') return;
+    const touch = e.touches[0];
+    const dx = Math.abs(touch.clientX - touchStartX);
+    const dy = Math.abs(touch.clientY - touchStartY);
+    if (touchMode === 'pending') {
+      const gesture = classifyTouchGesture(dx, dy);
+      if (gesture !== 'pending' && gesture !== 'ambiguous') {
+        touchMode = gesture === 'horizontal' ? 'adjusting' : 'scrolling';
+      }
+      dragging = touchMode === 'adjusting';
+    }
     if (!dragging) return;
+    e.preventDefault();
     const rect = canvasBefore.getBoundingClientRect();
-    state.sliderPos = Math.max(0.02, Math.min(0.98, (e.touches[0].clientX - rect.left) / rect.width));
+    state.sliderPos = Math.max(0.02, Math.min(0.98, (touch.clientX - rect.left) / rect.width));
     updateClip();
-  });
-  document.addEventListener('touchend', () => { dragging = false; });
+  }, { passive: false });
+  document.addEventListener('touchend', () => {
+    dragging = false;
+    touchMode = 'idle';
+  }, { passive: true });
 })();
 
 function updateClip() {
@@ -1670,10 +1696,15 @@ $('output-intent').addEventListener('change', function () {
 // ── Export ────────────────────────────────────────────────────
 downloadBtn.addEventListener('click', () => exportPhoto(state.activeIdx));
 downloadAllBtn.addEventListener('click', exportAll);
+mobileDownloadBtn.addEventListener('click', () => downloadBtn.click());
+mobileDownloadAllBtn.addEventListener('click', () => downloadAllBtn.click());
+$('mobile-add-btn').addEventListener('click', () => addInput.click());
+$('mobile-reset-btn').addEventListener('click', () => $('reset-btn').click());
 
 async function exportPhoto(idx) {
   if (idx < 0) return;
   downloadBtn.disabled = true;
+  mobileDownloadBtn.disabled = true;
   showProc('고화질 사진 만드는 중...', state.photos[idx]?.name || '');
   await tick();
   try {
@@ -1694,6 +1725,7 @@ async function exportPhoto(idx) {
   } finally {
     hideProc();
     downloadBtn.disabled = false;
+    mobileDownloadBtn.disabled = false;
   }
 }
 
@@ -1808,8 +1840,9 @@ async function buildPhotoBlob(idx) {
   const autoNoise = p.autoCorr.autoNoiseReduction * (params.autoStrength / 100);
   const noiseReduction = Math.max(params.noiseReduction, autoNoise);
   if (noiseReduction > 0) applyNoiseReduction(fx, workW, workH, noiseReduction / 100);
-  if (params.clarity > 0)        applyClarity(fx, workW, workH, params.clarity);
-  if (params.sharpness > 0)      unsharpMask(fx, workW, workH, params.sharpness / 100);
+  const exportNoiseScore = p.autoCorr.features?.noiseScore || 0;
+  if (params.clarity > 0)        applyClarity(fx, workW, workH, params.clarity, exportNoiseScore);
+  if (params.sharpness > 0)      unsharpMask(fx, workW, workH, params.sharpness / 100, exportNoiseScore);
 
   if (params.skinSmooth > 0) {
     if (scaledDetections.length) faceSmooth(fx, workW, workH, params.skinSmooth / 100, scaledDetections);
@@ -1819,7 +1852,10 @@ async function buildPhotoBlob(idx) {
   if (target) {
     const outputSharpening = state.outputIntent === 'print-matte' ? 0.05
       : state.outputIntent === 'print-glossy' ? 0.035 : 0.018;
-    unsharpMask(out.getContext('2d', { willReadFrequently: true }), out.width, out.height, outputSharpening);
+    unsharpMask(
+      out.getContext('2d', { willReadFrequently: true }), out.width, out.height,
+      outputSharpening, exportNoiseScore,
+    );
   }
 
   const fmt  = $('format-select').value;
@@ -1845,6 +1881,7 @@ async function exportAll() {
     return;
   }
   downloadAllBtn.disabled = true;
+  mobileDownloadAllBtn.disabled = true;
   const total = exportItems.length;
   showProc('선택 사진 자동 처리 중...', `0 / ${total}장`);
   await tick();
@@ -1901,6 +1938,8 @@ async function exportAll() {
   } finally {
     hideProc();
     downloadAllBtn.disabled = false;
+    mobileDownloadAllBtn.disabled = state.photos.length <= 1
+      || !state.photos.some(photo => photo.exportIncluded !== false);
   }
 }
 
@@ -2069,36 +2108,118 @@ document.addEventListener('click', event => {
   if (event.target.closest('#editor button')) scheduleProjectSave();
 });
 
+// Vertical scrolling over a range control must not change its value.
+(function initRangeTouchGuards() {
+  document.querySelectorAll('input[type="range"]').forEach(range => {
+    let startX = 0, startY = 0, startValue = range.value, mode = 'idle';
+
+    const restoreValue = () => {
+      if (mode !== 'scrolling' || range.value === startValue) return;
+      range.value = startValue;
+      range.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+
+    range.addEventListener('touchstart', event => {
+      const touch = event.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
+      startValue = range.value;
+      mode = 'pending';
+    }, { passive: true });
+
+    range.addEventListener('touchmove', event => {
+      const touch = event.touches[0];
+      const dx = Math.abs(touch.clientX - startX);
+      const dy = Math.abs(touch.clientY - startY);
+      if (mode === 'pending') {
+        const gesture = classifyTouchGesture(dx, dy);
+        if (gesture !== 'pending' && gesture !== 'ambiguous') {
+          mode = gesture === 'vertical' ? 'scrolling' : 'adjusting';
+        }
+      }
+      restoreValue();
+    }, { passive: true });
+
+    range.addEventListener('input', () => {
+      if (mode === 'scrolling') queueMicrotask(restoreValue);
+    });
+
+    range.addEventListener('touchend', () => {
+      restoreValue();
+      mode = 'idle';
+    }, { passive: true });
+  });
+})();
+
 // ── Mobile Bottom Sheet ───────────────────────────────────────
 (function initBottomSheet() {
   const panel   = $('controls-panel');
   const handle  = $('panel-handle');
+  const backdrop = $('sheet-backdrop');
   if (!handle) return;
 
-  let startY = 0, startOpen = false, dragging = false;
+  let startX = 0, startY = 0, startOpen = false, dragging = false, moved = false;
+  let suppressClick = false;
 
   function isMobile() { return window.innerWidth <= 768; }
 
+  function setSheetOpen(open) {
+    panel.classList.toggle('sheet-open', open);
+    document.body.classList.toggle('mobile-sheet-open', open && isMobile());
+    handle.setAttribute('aria-expanded', String(open));
+    if (!open) panel.scrollTop = 0;
+  }
+
   handle.addEventListener('click', () => {
     if (!isMobile()) return;
-    panel.classList.toggle('sheet-open');
+    if (suppressClick) return;
+    setSheetOpen(!panel.classList.contains('sheet-open'));
+  });
+
+  handle.addEventListener('keydown', event => {
+    if (!isMobile() || !['Enter', ' '].includes(event.key)) return;
+    event.preventDefault();
+    setSheetOpen(!panel.classList.contains('sheet-open'));
   });
 
   // Touch drag to open/close
   handle.addEventListener('touchstart', e => {
     if (!isMobile()) return;
+    startX = e.touches[0].clientX;
     startY = e.touches[0].clientY;
     startOpen = panel.classList.contains('sheet-open');
     dragging = true;
+    moved = false;
+  }, { passive: true });
+
+  handle.addEventListener('touchmove', e => {
+    if (!dragging || !isMobile()) return;
+    const dx = Math.abs(e.touches[0].clientX - startX);
+    const dy = Math.abs(e.touches[0].clientY - startY);
+    if (classifyTouchGesture(dx, dy, 7, 1) === 'vertical') moved = true;
   }, { passive: true });
 
   document.addEventListener('touchend', e => {
     if (!dragging || !isMobile()) return;
     dragging = false;
     const dy = e.changedTouches[0].clientY - startY;
-    if (startOpen && dy > 60)       panel.classList.remove('sheet-open');
-    else if (!startOpen && dy < -60) panel.classList.add('sheet-open');
+    if (moved && startOpen && dy > 48) setSheetOpen(false);
+    else if (moved && !startOpen && dy < -48) setSheetOpen(true);
+    if (moved) {
+      suppressClick = true;
+      setTimeout(() => { suppressClick = false; }, 350);
+    }
   }, { passive: true });
+
+  backdrop.addEventListener('click', () => setSheetOpen(false));
+  $('reset-btn').addEventListener('click', () => setSheetOpen(false));
+  addInput.addEventListener('change', () => setSheetOpen(false));
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && panel.classList.contains('sheet-open')) setSheetOpen(false);
+  });
+  window.addEventListener('resize', () => {
+    if (!isMobile()) setSheetOpen(false);
+  });
 })();
 
 // ── Boot ──────────────────────────────────────────────────────

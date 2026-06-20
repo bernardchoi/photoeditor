@@ -282,6 +282,7 @@ header p {
   align-items: center;
   justify-content: center;
   z-index: 10;
+  touch-action: pan-y;
 }
 
 .slider-line {
@@ -1011,6 +1012,9 @@ select {
   display: none;
 }
 
+.sheet-backdrop,
+.mobile-action-dock { display: none; }
+
 /* ── Responsive ────────────────────────────────────────────── */
 @media (max-width: 768px) {
   .project-status { display: none; }
@@ -1026,13 +1030,13 @@ select {
     grid-template-rows: 1fr;
     min-height: calc(100vh - 56px);
     min-height: calc(100dvh - 56px);
-    padding-bottom: 72px; /* space for collapsed sheet */
+    padding-bottom: calc(136px + env(safe-area-inset-bottom));
   }
 
   .editor-left {
-    height: calc(100vh - 56px - 72px - 72px); /* viewport - header - thumb - collapsed sheet */
-    height: calc(100dvh - 56px - 72px - 72px);
-    min-height: 240px;
+    height: calc(100vh - 56px - 64px - 72px - env(safe-area-inset-bottom));
+    height: calc(100dvh - 56px - 64px - 72px - env(safe-area-inset-bottom));
+    min-height: 220px;
   }
 
   .workflow-bar {
@@ -1068,19 +1072,21 @@ select {
   /* Bottom sheet */
   .controls-panel {
     position: fixed;
-    bottom: 0;
+    bottom: calc(64px + env(safe-area-inset-bottom));
     left: 0;
     right: 0;
     z-index: 300;
     border-left: none;
     border-top: 1px solid var(--border);
     border-radius: 16px 16px 0 0;
-    max-height: 82vh;
+    max-height: calc(82dvh - 64px - env(safe-area-inset-bottom));
     height: auto;
     /* Collapsed: only show handle bar */
     transform: translateY(calc(100% - 72px));
     transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
     overflow: hidden;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
     display: flex;
     flex-direction: column;
   }
@@ -1100,6 +1106,11 @@ select {
     flex-shrink: 0;
     min-height: 52px;
     border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--surface);
+    touch-action: none;
   }
 
   .handle-bar {
@@ -1118,7 +1129,7 @@ select {
     border-radius: 2px;
   }
 
-  .panel-handle { position: relative; }
+  .panel-handle { position: sticky; }
 
   .handle-label {
     font-size: 0.92rem;
@@ -1144,6 +1155,7 @@ select {
   input[type="range"] {
     height: 20px;
     padding: 8px 0;
+    touch-action: pan-y;
   }
 
   input[type="range"]::-webkit-slider-thumb {
@@ -1181,13 +1193,59 @@ select {
     font-size: 0.82rem;
   }
 
-  /* Bottom actions sticky inside sheet */
-  .bottom-actions {
-    position: sticky;
-    bottom: 0;
-    background: var(--surface);
-    padding: 0.75rem 0 0;
-    border-top: 1px solid var(--border);
-    margin-top: auto;
+  .sheet-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0 0 calc(64px + env(safe-area-inset-bottom));
+    z-index: 250;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
   }
+
+  body.mobile-sheet-open { overflow: hidden; }
+  body.mobile-sheet-open .sheet-backdrop { opacity: 1; pointer-events: auto; }
+
+  .mobile-action-dock {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr 0.72fr 0.72fr;
+    gap: 0.45rem;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 320;
+    min-height: calc(64px + env(safe-area-inset-bottom));
+    padding: 0.55rem 0.65rem calc(0.55rem + env(safe-area-inset-bottom));
+    background: rgba(24, 24, 29, 0.97);
+    border-top: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+  }
+
+  .mobile-action-dock button {
+    min-width: 0;
+    min-height: 44px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 0.45rem 0.3rem;
+    background: var(--surface2);
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+
+  .mobile-action-dock .mobile-action-primary { background: var(--accent); border-color: var(--accent); color: white; }
+  .mobile-action-dock button:disabled { opacity: 0.42; }
+
+  /* Dock replaces actions at the end of the long sheet. */
+  .bottom-actions {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) and (max-height: 700px) {
+  .workflow-bar { min-height: 124px; gap: 0.35rem; }
+  .btn-workflow, .filter-btn { min-height: 32px; }
+  .editor-left { min-height: 190px; }
 }

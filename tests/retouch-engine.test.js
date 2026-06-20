@@ -3,7 +3,8 @@
 const assert = require('node:assert/strict');
 const {
   luminance, transformLuminance, applySmartPixel, adjustLuminancePixel,
-  applyBasicAdjustmentsPixel, getLocalLiftWeight,
+  applyBasicAdjustmentsPixel, getLocalLiftWeight, applyTonalAdjustmentsPixel,
+  computeDetailDelta,
 } = require('../retouch-engine.js');
 
 const identity = { exposureEV: 0, shadowLift: 0, highlightCompression: 0, contrastBoost: 0, wb: [1, 1, 1], wbConfidence: 1 };
@@ -48,6 +49,32 @@ assert.ok(colorContrast[0] > colorContrast[1] && colorContrast[1] > colorContras
 const vividBoost = applyBasicAdjustmentsPixel(25, 80, 220, 0, 0, 50);
 assert.ok(vividBoost.every(value => value >= 0 && value <= 255));
 assert.ok(getLocalLiftWeight(245, 245, 245) < getLocalLiftWeight(90, 90, 90));
+
+const safeContrast = applyBasicAdjustmentsPixel(245, 245, 245, 0, 100, 0);
+assert.ok(safeContrast[0] < 253);
+const blackShadow = applyTonalAdjustmentsPixel(0, 0, 0, 0, 100);
+assert.ok(blackShadow.every(value => value < 0.01));
+const recoveredShadow = applyTonalAdjustmentsPixel(55, 55, 55, 0, 60);
+assert.ok(recoveredShadow[0] > 55);
+const protectedHighlight = applyTonalAdjustmentsPixel(220, 220, 220, 60, 0);
+assert.ok(protectedHighlight[0] < 220 && protectedHighlight[0] > 180);
+assert.ok(Math.abs(computeDetailDelta(45, 10, 0.7, 12)) < Math.abs(computeDetailDelta(120, 10, 0.7, 2)));
+
+for (const contrast of [-100, -40, 40, 100]) {
+  let previous = -1;
+  for (let value = 0; value <= 255; value++) {
+    const adjusted = applyBasicAdjustmentsPixel(value, value, value, 0, contrast, 0)[0];
+    assert.ok(adjusted >= previous - 0.01, `contrast curve must be monotonic at ${value}`);
+    previous = adjusted;
+  }
+}
+
+for (const controls of [[100, 100], [100, -100], [-100, 100], [-100, -100]]) {
+  for (let value = 0; value <= 255; value += 17) {
+    const adjusted = applyTonalAdjustmentsPixel(value, value, value, controls[0], controls[1]);
+    assert.ok(adjusted.every(channel => Number.isFinite(channel) && channel >= 0 && channel <= 255));
+  }
+}
 
 for (let r = 0; r <= 255; r += 51) {
   for (let g = 0; g <= 255; g += 51) {

@@ -99,6 +99,14 @@
     return Array.from(groups.values()).filter(group => group.length > 1);
   }
 
+  function classifyTouchGesture(deltaX, deltaY, threshold = 7, bias = 1.15) {
+    const dx = Math.abs(deltaX), dy = Math.abs(deltaY);
+    if (Math.max(dx, dy) < threshold) return 'pending';
+    if (dy > dx * bias) return 'vertical';
+    if (dx > dy * bias) return 'horizontal';
+    return 'ambiguous';
+  }
+
   return Object.freeze({
     evaluateQualitySignals,
     isDuplicateCandidate,
@@ -107,5 +115,6 @@
     shouldFlushZip,
     rankPhotoForExport,
     buildDuplicateGroups,
+    classifyTouchGesture,
   });
 });

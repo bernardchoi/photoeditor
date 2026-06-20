@@ -9,6 +9,9 @@
     const t = Math.max(0, Math.min(1, (value - edge0) / Math.max(0.0001, edge1 - edge0)));
     return t * t * (3 - 2 * t);
   };
+  const isSkinLike = (r, g, b, y = luminance(r, g, b)) => (
+    r > g && g > b && r - b > 12 && r - b < 100 && r - g < 65 && y > 42 && y < 232
+  );
 
   function transformLuminance(y, corr, strength) {
     const source = clamp(y);
@@ -23,7 +26,7 @@
       : 1;
     let next = source + exposureDelta * exposureProtection;
 
-    const shadowWeight = 1 - smoothstep(0.12, 0.68, sourceN);
+    const shadowWeight = smoothstep(0.008, 0.09, sourceN) * (1 - smoothstep(0.38, 0.7, sourceN));
     next += (corr.shadowLift || 0) * strength * shadowWeight;
 
     const highlightWeight = smoothstep(0.62, 0.98, next / 255);
@@ -56,8 +59,7 @@
     const saturation = max > 0 ? (max - min) / max : 0;
     const saturatedProtection = 1 - smoothstep(0.18, 0.72, saturation) * 0.72;
     const highlightProtection = 1 - smoothstep(0.78, 1, y / 255) * 0.45;
-    const skinLike = r > g && g > b && r - b > 14 && r - b < 95 && y > 45 && y < 230;
-    const skinProtection = skinLike ? 0.52 : 1;
+    const skinProtection = isSkinLike(r, g, b, y) ? 0.52 : 1;
     const wbStrength = strength * (corr.wbConfidence ?? 1) * saturatedProtection * highlightProtection * skinProtection;
     const wb = corr.wb || [1, 1, 1];
     rr *= 1 + (wb[0] - 1) * wbStrength;
@@ -66,7 +68,18 @@
 
     const correctedY = luminance(rr, gg, bb);
     const recenter = nextY - correctedY;
-    return fitGamut(rr + recenter, gg + recenter, bb + recenter, nextY);
+    const centered = fitGamut(rr + recenter, gg + recenter, bb + recenter, nextY);
+    const vibrance = Math.max(0, corr.vibrance || 0) / 100;
+    if (!vibrance) return centered;
+    const vibranceProtection = (1 - smoothstep(0.16, 0.68, saturation) * 0.92)
+      * (isSkinLike(r, g, b, y) ? 0.45 : 1);
+    const vibranceFactor = 1 + vibrance * strength * vibranceProtection;
+    return fitGamut(
+      nextY + (centered[0] - nextY) * vibranceFactor,
+      nextY + (centered[1] - nextY) * vibranceFactor,
+      nextY + (centered[2] - nextY) * vibranceFactor,
+      nextY,
+    );
   }
 
   function adjustLuminancePixel(r, g, b, nextY) {
@@ -77,18 +90,26 @@
 
   function applyBasicAdjustmentsPixel(r, g, b, brightness, contrast, saturation) {
     const sourceY = luminance(r, g, b);
-    const brightnessDelta = (brightness || 0) * 2.55;
-    const contrastValue = contrast || 0;
-    const contrastFactor = (259 * (contrastValue + 255)) / (255 * (259 - contrastValue));
-    const nextY = clamp(contrastFactor * (sourceY + brightnessDelta - 128) + 128);
+    let tone = clamp(sourceY + (brightness || 0) * 2.55) / 255;
+    const contrastAmount = Math.max(-1, Math.min(1, (contrast || 0) / 100));
+    if (contrastAmount >= 0) {
+      const exponent = 1 + contrastAmount * 0.55;
+      tone = tone < 0.5
+        ? 0.5 * Math.pow(tone * 2, exponent)
+        : 1 - 0.5 * Math.pow((1 - tone) * 2, exponent);
+    } else {
+      tone += (0.5 - tone) * -contrastAmount * 0.68;
+    }
+    const nextY = clamp(tone * 255);
     const toned = adjustLuminancePixel(r, g, b, nextY);
 
     const max = Math.max(...toned), min = Math.min(...toned);
     const chroma = max > 0 ? (max - min) / max : 0;
     const saturationAmount = (saturation || 0) / 100;
-    const protection = saturationAmount > 0
+    let protection = saturationAmount > 0
       ? 1 - smoothstep(0.42, 0.86, chroma) * 0.68
       : 1;
+    if (saturationAmount > 0 && isSkinLike(r, g, b, sourceY)) protection *= 0.55;
     const saturationFactor = 1 + saturationAmount * protection;
     return fitGamut(
       nextY + (toned[0] - nextY) * saturationFactor,
@@ -107,6 +128,32 @@
     return highlightProtection * colorProtection;
   }
 
+  function applyTonalAdjustmentsPixel(r, g, b, highlights, shadows) {
+    const y = luminance(r, g, b);
+    const lum = y / 255;
+    const shadowMask = smoothstep(0.015, 0.16, lum) * (1 - smoothstep(0.42, 0.72, lum));
+    const highlightMask = smoothstep(0.5, 0.82, lum) * (1 - smoothstep(0.985, 1, lum) * 0.72);
+    const shadowDelta = Math.max(-1, Math.min(1, (shadows || 0) / 100)) * 42 * shadowMask;
+    const highlightDelta = -Math.max(-1, Math.min(1, (highlights || 0) / 100)) * 38 * highlightMask;
+    return adjustLuminancePixel(r, g, b, clamp(y + shadowDelta + highlightDelta));
+  }
+
+  function computeDetailDelta(y, detail, amount, noiseScore = 0, mode = 'sharpen') {
+    const lum = clamp(y) / 255;
+    const strength = Math.max(0, amount || 0);
+    if (!strength) return 0;
+    const tonalProtection = smoothstep(0.025, 0.18, lum)
+      * (1 - smoothstep(0.9, 0.995, lum) * 0.72);
+    const noiseProtection = 1 - smoothstep(4.5, 12, noiseScore || 0) * 0.68;
+    const threshold = (mode === 'clarity' ? 1.3 : 2.1)
+      + Math.pow(1 - lum, 2) * (mode === 'clarity' ? 1.8 : 4.2)
+      + Math.max(0, noiseScore || 0) * (mode === 'clarity' ? 0.08 : 0.18);
+    if (Math.abs(detail) <= threshold) return 0;
+    const limit = mode === 'clarity' ? 15 : 12;
+    const gain = mode === 'clarity' ? 0.72 : 1.18;
+    return Math.max(-limit, Math.min(limit, detail)) * strength * gain * tonalProtection * noiseProtection;
+  }
+
   return Object.freeze({
     luminance,
     transformLuminance,
@@ -114,6 +161,8 @@
     adjustLuminancePixel,
     applyBasicAdjustmentsPixel,
     getLocalLiftWeight,
+    applyTonalAdjustmentsPixel,
+    computeDetailDelta,
     fitGamut,
   });
 });

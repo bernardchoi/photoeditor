@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const {
   evaluateQualitySignals, isDuplicateCandidate, getSafeExportDimensions, shouldFlushZip,
-  rankPhotoForExport, buildDuplicateGroups,
+  rankPhotoForExport, buildDuplicateGroups, classifyTouchGesture,
 } = require('../selection-engine.js');
 
 const codes = metrics => evaluateQualitySignals(metrics).details.map(item => item.code);
@@ -38,5 +38,9 @@ const duplicateGroups = buildDuplicateGroups([
   { ...base, hash: '1'.repeat(64), avgColor: [30, 40, 50] },
 ]);
 assert.deepEqual(duplicateGroups, [[0, 1]]);
+assert.equal(classifyTouchGesture(2, 3), 'pending');
+assert.equal(classifyTouchGesture(4, 18), 'vertical');
+assert.equal(classifyTouchGesture(20, 3), 'horizontal');
+assert.equal(classifyTouchGesture(10, 10), 'ambiguous');
 
-console.log('selection-engine: 12 checks passed');
+console.log('selection-engine: 16 checks passed');
