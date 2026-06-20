@@ -76,6 +76,20 @@ header p {
   margin-top: 1px;
 }
 
+.header-right { display: flex; align-items: center; gap: 0.55rem; }
+.project-status { color: var(--text-muted); font-size: 0.72rem; }
+.btn-header {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.4rem 0.58rem;
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.btn-header:hover { border-color: var(--accent); }
+
 /* ── Upload ────────────────────────────────────────────────── */
 #upload-zone {
   display: flex;
@@ -802,6 +816,17 @@ select {
   cursor: pointer;
 }
 
+.output-intent-row {
+  margin-top: 0.65rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+}
+.output-intent-row label { display: block; margin-bottom: 0.4rem; font-size: 0.78rem; font-weight: 700; }
+.output-intent-row select { width: 100%; }
+.output-intent-row p { margin: 0.4rem 0 0; color: var(--text-muted); font-size: 0.68rem; line-height: 1.45; }
+
 /* Buttons */
 .btn-primary {
   background: var(--accent);
@@ -988,6 +1013,8 @@ select {
 
 /* ── Responsive ────────────────────────────────────────────── */
 @media (max-width: 768px) {
+  .project-status { display: none; }
+  .btn-header { padding: 0.36rem 0.48rem; }
   /* Upload */
   .upload-content {
     padding: 2.5rem 1.5rem;

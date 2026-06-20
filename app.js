@@ -22,6 +22,11 @@ const {
   luminance, transformLuminance, applySmartPixel, adjustLuminancePixel,
   applyBasicAdjustmentsPixel, getLocalLiftWeight,
 } = window.RetouchEngine;
+const {
+  createPhotoSnapshot, applyPhotoSnapshot, replaceFiles: storeProjectFiles,
+  saveMetadata: storeProjectMetadata, loadProject: loadStoredProject,
+  clearProject: clearStoredProject,
+} = window.ProjectStore;
 
 const DEFAULT_PARAMS = Object.freeze({
   autoStrength: 70,
@@ -38,12 +43,16 @@ const state = {
   activeIdx: -1,
   faceApiLoaded: false,
   selectedSize: 'original',
+  outputIntent: 'print-glossy',
   sliderPos: 0.5,
   reviewFilter: 'all',
   cancelRequested: false,
   params: makeDefaultParams(),
 };
 let faceApiReadyPromise = null;
+let projectSaveTimer = null;
+let projectRestoring = false;
+let projectFilesPersisted = false;
 
 // ── DOM ───────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -121,6 +130,7 @@ $('reset-btn').addEventListener('click', () => {
   state.photos = [];
   state.activeIdx = -1;
   state.reviewFilter = 'all';
+  projectFilesPersisted = false;
   state.params = makeDefaultParams();
   editor.classList.add('hidden');
   uploadZone.style.display = '';
@@ -128,6 +138,8 @@ $('reset-btn').addEventListener('click', () => {
   thumbStrip.innerHTML = '';
   photoCounter.classList.add('hidden');
   document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.filter === 'all'));
+  clearStoredProject().catch(error => console.warn('Project clear failed:', error));
+  updateProjectStatus('저장된 작업 없음');
 });
 
 // ── RAW / unsupported format detection ───────────────────────
@@ -161,16 +173,17 @@ async function addMoreFiles(files) {
   await loadImages(ok, false);
 }
 
-async function loadImages(files, isFirst) {
+async function loadImages(files, isFirst, options = {}) {
   showProc('사진 불러오는 중...', '');
   const start = state.photos.length;
   const images = await Promise.all(files.map(loadImageFile));
 
   images.forEach((img, i) => {
     if (!img) return;
-    state.photos.push({
+    const photo = {
       image: img.image,
       name: img.name,
+      sourceFile: files[i],
       objectURL: img.objectURL,
       orientation: img.orientation || 1,
       sizeMB: img.sizeMB || 0,
@@ -179,6 +192,7 @@ async function loadImages(files, isFirst) {
       autoDefaultsApplied: false,
       environmentOverride: 'auto',
       crop: makeDefaultCrop(),
+      cropRestored: false,
       autoCorr: null,
       faceDetections: [],
       faceAdjustments: [],
@@ -192,11 +206,24 @@ async function loadImages(files, isFirst) {
       displayW: 0,
       displayH: 0,
       ready: false,
-    });
+    };
+    applyPhotoSnapshot(photo, options.snapshots?.[i]);
+    state.photos.push(photo);
   });
 
   updateCounter();
   renderThumbs();
+
+  if (!options.skipPersist) {
+    try {
+      await storeProjectFiles(state.photos.map(p => p.sourceFile));
+      projectFilesPersisted = true;
+    } catch (error) {
+      projectFilesPersisted = false;
+      console.warn('Photo persistence failed:', error);
+      updateProjectStatus('사진 저장 공간 부족');
+    }
+  }
 
   // Switch to first new photo
   await setActive(start);
@@ -206,6 +233,7 @@ async function loadImages(files, isFirst) {
     if (error.name === 'AbortError') showToast('자동 검수를 중지했습니다. 분석된 사진은 그대로 사용할 수 있습니다.', 'info');
     else throw error;
   }
+  await saveProjectState();
   hideProc();
 }
 
@@ -639,7 +667,7 @@ async function setActive(idx) {
       } catch { p.faceDetections = []; }
     }
     finalizePhotoAnalysis(p, raw);
-    autoFramePhoto(p);
+    if (!p.cropRestored) autoFramePhoto(p);
     p.ready = true;
     thumbStrip.querySelector(`[data-idx="${idx}"]`)?.classList.add('ready');
     hideProc();
@@ -1393,14 +1421,18 @@ function autoFramePhoto(p) {
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const faceW = Math.max(1, maxX - minX), faceH = Math.max(1, maxY - minY);
-  const needW = Math.min(p.displayW, faceW * 2.0);
-  const needH = Math.min(p.displayH, faceH * 2.4);
+  const faceBounds = p.faceDetections.map(getFaceBounds);
+  const largestFaceW = Math.max(...faceBounds.map(box => box.maxX - box.minX));
+  const largestFaceH = Math.max(...faceBounds.map(box => box.maxY - box.minY));
+  const isGroup = p.faceDetections.length >= 3;
+  const needW = Math.min(p.displayW, faceW + largestFaceW * (isGroup ? 1.5 : 2.1));
+  const needH = Math.min(p.displayH, faceH + largestFaceH * (isGroup ? 3.0 : 3.4));
   const base = calculateCropRect(p.displayW, p.displayH, target.w, target.h, makeDefaultCrop());
-  crop.zoom = Math.max(1, Math.min(1.35, Math.min(base.sw / needW, base.sh / needH)));
+  crop.zoom = Math.max(1, Math.min(isGroup ? 1.12 : 1.28, Math.min(base.sw / needW, base.sh / needH)));
 
   const rect = calculateCropRect(p.displayW, p.displayH, target.w, target.h, crop);
   const centerX = (minX + maxX) / 2;
-  const centerY = (minY + maxY) / 2 - faceH * 0.12;
+  const centerY = (minY + maxY) / 2 + largestFaceH * (isGroup ? 0.55 : 0.4);
   crop.x = p.displayW === rect.sw ? 0.5 : (centerX - rect.sw / 2) / (p.displayW - rect.sw);
   crop.y = p.displayH === rect.sh ? 0.5 : (centerY - rect.sh / 2) / (p.displayH - rect.sh);
   crop.x = Math.max(0, Math.min(1, crop.x));
@@ -1435,7 +1467,9 @@ function syncCropControls() {
   $('crop-x-val').textContent = Math.round(p.crop.x * 100);
   $('crop-y-val').textContent = Math.round(p.crop.y * 100);
   $('crop-status').textContent = p.faceDetections.length
-    ? `얼굴 ${p.faceDetections.length}명 중심 자동 맞춤`
+    ? p.faceDetections.length >= 3
+      ? `단체사진 ${p.faceDetections.length}명 안전 영역`
+      : `얼굴 ${p.faceDetections.length}명 여백 보호`
     : '가운데 자동 맞춤';
 }
 
@@ -1587,6 +1621,7 @@ document.querySelectorAll('.size-btn').forEach(btn => {
     document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     state.selectedSize = btn.dataset.size;
+    state.photos.forEach(photo => { photo.cropRestored = false; });
     const p = state.photos[state.activeIdx];
     if (p && state.selectedSize !== 'original') autoFramePhoto(p);
     syncCropControls();
@@ -1625,6 +1660,11 @@ $('center-crop-btn').addEventListener('click', () => {
 
 $('quality').addEventListener('input', function () {
   $('quality-val').textContent = `${this.value}%`;
+});
+
+$('output-intent').addEventListener('change', function () {
+  state.outputIntent = this.value;
+  scheduleProjectSave();
 });
 
 // ── Export ────────────────────────────────────────────────────
@@ -1690,7 +1730,7 @@ async function ensurePhotoAnalysis(idx) {
     } catch { p.faceDetections = []; }
   }
   finalizePhotoAnalysis(p, analysisData);
-  autoFramePhoto(p);
+  if (!p.cropRestored) autoFramePhoto(p);
 }
 
 async function buildPhotoBlob(idx) {
@@ -1717,7 +1757,7 @@ async function buildPhotoBlob(idx) {
   }
 
   const fc = Object.assign(document.createElement('canvas'), { width: workW, height: workH });
-  const fx = fc.getContext('2d', { willReadFrequently: true });
+  const fx = fc.getContext('2d', { willReadFrequently: true, colorSpace: 'srgb' });
   if (target && o === 1) {
     fx.drawImage(img, sourceCrop.sx, sourceCrop.sy, sourceCrop.sw, sourceCrop.sh, 0, 0, workW, workH);
   } else if (target) {
@@ -1776,7 +1816,11 @@ async function buildPhotoBlob(idx) {
   }
 
   const out = fc;
-  if (target) unsharpMask(out.getContext('2d', { willReadFrequently: true }), out.width, out.height, 0.035);
+  if (target) {
+    const outputSharpening = state.outputIntent === 'print-matte' ? 0.05
+      : state.outputIntent === 'print-glossy' ? 0.035 : 0.018;
+    unsharpMask(out.getContext('2d', { willReadFrequently: true }), out.width, out.height, outputSharpening);
+  }
 
   const fmt  = $('format-select').value;
   const qual = +$('quality').value / 100;
@@ -1924,6 +1968,107 @@ function showToast(msg, type = 'error') {
   setTimeout(() => el.remove(), 4000);
 }
 
+// ── Local project persistence ─────────────────────────────────
+function updateProjectStatus(text) {
+  $('project-status').textContent = text;
+}
+
+function getProjectMetadata() {
+  return {
+    selectedSize: state.selectedSize,
+    outputIntent: state.outputIntent,
+    activeIdx: state.activeIdx,
+    reviewFilter: state.reviewFilter,
+    format: $('format-select').value,
+    quality: +$('quality').value,
+    photos: state.photos.map(createPhotoSnapshot),
+  };
+}
+
+async function saveProjectState(manual = false) {
+  if (!state.photos.length || projectRestoring) return;
+  if (!projectFilesPersisted) {
+    updateProjectStatus('사진 저장 공간 부족');
+    if (manual) showToast('브라우저 저장 공간이 부족합니다. 다운로드 후 작업을 마쳐주세요.');
+    return;
+  }
+  try {
+    updateProjectStatus('저장 중…');
+    await storeProjectMetadata(getProjectMetadata());
+    const time = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+    updateProjectStatus(`${time} 자동 저장`);
+    if (manual) showToast('현재 작업을 이 브라우저에 저장했습니다.', 'info');
+  } catch (error) {
+    console.warn('Project save failed:', error);
+    updateProjectStatus('자동 저장 실패');
+  }
+}
+
+function scheduleProjectSave() {
+  if (!state.photos.length || projectRestoring) return;
+  clearTimeout(projectSaveTimer);
+  updateProjectStatus('변경사항 저장 대기');
+  projectSaveTimer = setTimeout(() => saveProjectState(), 700);
+}
+
+async function restoreProject() {
+  projectRestoring = true;
+  try {
+    const saved = await loadStoredProject();
+    if (!saved.files.length || !saved.metadata) {
+      updateProjectStatus('저장된 작업 없음');
+      return;
+    }
+    const files = saved.files.map(item => new File([item.blob], item.name, {
+      type: item.type || item.blob.type,
+      lastModified: item.lastModified,
+    }));
+    projectFilesPersisted = true;
+    state.selectedSize = saved.metadata.selectedSize || 'original';
+    state.outputIntent = saved.metadata.outputIntent || 'print-glossy';
+    state.reviewFilter = saved.metadata.reviewFilter || 'all';
+    $('format-select').value = saved.metadata.format || 'jpeg';
+    $('quality').value = saved.metadata.quality || 95;
+    $('quality-val').textContent = `${$('quality').value}%`;
+    $('output-intent').value = state.outputIntent;
+    document.querySelectorAll('.size-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.size === state.selectedSize));
+    document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.filter === state.reviewFilter));
+    uploadZone.style.display = 'none';
+    editor.classList.remove('hidden');
+    await loadImages(files, true, { skipPersist: true, snapshots: saved.metadata.photos || [] });
+    const restoredIndex = Math.max(0, Math.min(state.photos.length - 1, saved.metadata.activeIdx || 0));
+    await setActive(restoredIndex);
+    updateProjectStatus('이전 작업 복구됨');
+    showToast(`이전 작업 ${state.photos.length}장을 복구했습니다.`, 'info');
+  } catch (error) {
+    console.warn('Project restore failed:', error);
+    updateProjectStatus('작업 복구 실패');
+  } finally {
+    projectRestoring = false;
+  }
+}
+
+$('save-project-btn').addEventListener('click', async () => {
+  if (!state.photos.length) {
+    showToast('먼저 사진을 불러와주세요.', 'info');
+    return;
+  }
+  try {
+    await storeProjectFiles(state.photos.map(p => p.sourceFile));
+    projectFilesPersisted = true;
+  } catch {
+    projectFilesPersisted = false;
+  }
+  await saveProjectState(true);
+});
+
+document.addEventListener('input', event => {
+  if (event.target.matches('input[type="range"], select')) scheduleProjectSave();
+});
+document.addEventListener('click', event => {
+  if (event.target.closest('#editor button')) scheduleProjectSave();
+});
+
 // ── Mobile Bottom Sheet ───────────────────────────────────────
 (function initBottomSheet() {
   const panel   = $('controls-panel');
@@ -1958,3 +2103,4 @@ function showToast(msg, type = 'error') {
 
 // ── Boot ──────────────────────────────────────────────────────
 faceApiReadyPromise = loadFaceApi();
+restoreProject();
