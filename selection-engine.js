@@ -63,11 +63,49 @@
     return fileCount > 0 && currentBytes + nextBytes > limitBytes;
   }
 
+  function rankPhotoForExport(workflow) {
+    if (!workflow) return -Infinity;
+    return (workflow.baseQualityScore ?? workflow.qualityScore ?? 0)
+      + Math.min(20, workflow.focusScore || 0) * 0.6
+      + Math.min(10, workflow.faceCount || 0) * 0.4;
+  }
+
+  function buildDuplicateGroups(items) {
+    const parents = items.map((_, index) => index);
+    const find = index => {
+      while (parents[index] !== index) {
+        parents[index] = parents[parents[index]];
+        index = parents[index];
+      }
+      return index;
+    };
+    const union = (a, b) => {
+      const rootA = find(a), rootB = find(b);
+      if (rootA !== rootB) parents[rootB] = rootA;
+    };
+    for (let i = 0; i < items.length; i++) {
+      if (!items[i]) continue;
+      for (let j = 0; j < i; j++) {
+        if (items[j] && isDuplicateCandidate(items[j], items[i])) union(j, i);
+      }
+    }
+    const groups = new Map();
+    items.forEach((item, index) => {
+      if (!item) return;
+      const root = find(index);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(index);
+    });
+    return Array.from(groups.values()).filter(group => group.length > 1);
+  }
+
   return Object.freeze({
     evaluateQualitySignals,
     isDuplicateCandidate,
     colorDistance,
     getSafeExportDimensions,
     shouldFlushZip,
+    rankPhotoForExport,
+    buildDuplicateGroups,
   });
 });

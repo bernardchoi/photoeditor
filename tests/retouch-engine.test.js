@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const {
   luminance, transformLuminance, applySmartPixel, adjustLuminancePixel,
+  applyBasicAdjustmentsPixel, getLocalLiftWeight,
 } = require('../retouch-engine.js');
 
 const identity = { exposureEV: 0, shadowLift: 0, highlightCompression: 0, contrastBoost: 0, wb: [1, 1, 1], wbConfidence: 1 };
@@ -38,6 +39,15 @@ assert.ok(Math.max(...lifted) <= 255 && Math.min(...lifted) >= 0);
 
 assert.ok(transformLuminance(245, { ...identity, highlightCompression: 0.2 }, 1) < 245);
 assert.ok(Math.abs(transformLuminance(110, { ...identity, highlightCompression: 0.2 }, 1) - 110) < 0.1);
+assert.ok(transformLuminance(245, { ...identity, exposureEV: 0.4 }, 1) < 252);
+
+const neutralContrast = applyBasicAdjustmentsPixel(120, 120, 120, 0, 20, 0);
+assert.ok(Math.max(...neutralContrast) - Math.min(...neutralContrast) < 0.01);
+const colorContrast = applyBasicAdjustmentsPixel(170, 110, 90, 0, 20, 0);
+assert.ok(colorContrast[0] > colorContrast[1] && colorContrast[1] > colorContrast[2]);
+const vividBoost = applyBasicAdjustmentsPixel(25, 80, 220, 0, 0, 50);
+assert.ok(vividBoost.every(value => value >= 0 && value <= 255));
+assert.ok(getLocalLiftWeight(245, 245, 245) < getLocalLiftWeight(90, 90, 90));
 
 for (let r = 0; r <= 255; r += 51) {
   for (let g = 0; g <= 255; g += 51) {

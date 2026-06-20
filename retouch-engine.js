@@ -13,7 +13,15 @@
   function transformLuminance(y, corr, strength) {
     const source = clamp(y);
     const sourceN = source / 255;
-    let next = source * Math.pow(2, (corr.exposureEV || 0) * strength);
+    const exposureGain = Math.pow(2, (corr.exposureEV || 0) * strength);
+    const exposureDelta = source * exposureGain - source;
+    const exposureProtection = exposureDelta > 0
+      ? Math.min(
+        1 - smoothstep(0.68, 0.98, sourceN) * 0.78,
+        Math.max(0, (255 - source) * 0.65 / exposureDelta),
+      )
+      : 1;
+    let next = source + exposureDelta * exposureProtection;
 
     const shadowWeight = 1 - smoothstep(0.12, 0.68, sourceN);
     next += (corr.shadowLift || 0) * strength * shadowWeight;
@@ -67,11 +75,45 @@
     return fitGamut(r * nextY / y, g * nextY / y, b * nextY / y, nextY);
   }
 
+  function applyBasicAdjustmentsPixel(r, g, b, brightness, contrast, saturation) {
+    const sourceY = luminance(r, g, b);
+    const brightnessDelta = (brightness || 0) * 2.55;
+    const contrastValue = contrast || 0;
+    const contrastFactor = (259 * (contrastValue + 255)) / (255 * (259 - contrastValue));
+    const nextY = clamp(contrastFactor * (sourceY + brightnessDelta - 128) + 128);
+    const toned = adjustLuminancePixel(r, g, b, nextY);
+
+    const max = Math.max(...toned), min = Math.min(...toned);
+    const chroma = max > 0 ? (max - min) / max : 0;
+    const saturationAmount = (saturation || 0) / 100;
+    const protection = saturationAmount > 0
+      ? 1 - smoothstep(0.42, 0.86, chroma) * 0.68
+      : 1;
+    const saturationFactor = 1 + saturationAmount * protection;
+    return fitGamut(
+      nextY + (toned[0] - nextY) * saturationFactor,
+      nextY + (toned[1] - nextY) * saturationFactor,
+      nextY + (toned[2] - nextY) * saturationFactor,
+      nextY,
+    );
+  }
+
+  function getLocalLiftWeight(r, g, b) {
+    const y = luminance(r, g, b);
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const chroma = max > 0 ? (max - min) / max : 0;
+    const highlightProtection = 1 - smoothstep(0.64, 0.94, y / 255) * 0.9;
+    const colorProtection = 1 - smoothstep(0.55, 0.92, chroma) * 0.45;
+    return highlightProtection * colorProtection;
+  }
+
   return Object.freeze({
     luminance,
     transformLuminance,
     applySmartPixel,
     adjustLuminancePixel,
+    applyBasicAdjustmentsPixel,
+    getLocalLiftWeight,
     fitGamut,
   });
 });

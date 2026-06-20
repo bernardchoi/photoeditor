@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AutoRetouch — 자동 사진 보정</title>
-  <link rel="stylesheet" href="style.css?v=6">
+  <link rel="stylesheet" href="style.css?v=7">
 </head>
 <body>
   <header>
@@ -56,6 +56,11 @@
             <button class="filter-btn" data-filter="review">확인 필요 <span id="filter-review-count">0</span></button>
             <button class="filter-btn" data-filter="good">완료 <span id="filter-good-count">0</span></button>
             <button class="filter-btn" data-filter="duplicate">중복 <span id="filter-duplicate-count">0</span></button>
+            <button class="filter-btn" data-filter="excluded">출력 제외 <span id="filter-excluded-count">0</span></button>
+          </div>
+          <div class="workflow-actions">
+            <button class="btn-workflow" id="select-recommended-btn">추천 사진만</button>
+            <button class="btn-workflow" id="select-all-btn">모두 포함</button>
           </div>
         </div>
         <!-- Comparison View -->
@@ -104,6 +109,7 @@
             <button class="btn-review" id="review-approve-btn">자동 판단 맞음</button>
             <button class="btn-review btn-review-secondary" id="review-reject-btn">판단이 틀림</button>
           </div>
+          <button class="btn-selection" id="toggle-selection-btn">이 사진 출력에서 제외</button>
         </div>
 
         <!-- Auto Retouch -->
@@ -268,7 +274,7 @@
             </div>
           </div>
           <button class="btn-download" id="download-btn">현재 사진 다운로드</button>
-          <button class="btn-download-all hidden" id="download-all-btn">전체 ZIP 다운로드 (<span id="total-count">0</span>장)</button>
+          <button class="btn-download-all hidden" id="download-all-btn">선택 사진 ZIP 다운로드 (<span id="total-count">0</span>장)</button>
         </div>
 
         <div class="bottom-actions">
@@ -285,8 +291,8 @@
 
   <script src="vendor/face-api.min.js"></script>
   <script src="vendor/jszip.min.js"></script>
-  <script src="selection-engine.js?v=1"></script>
-  <script src="retouch-engine.js?v=1"></script>
-  <script src="app.js?v=7"></script>
+  <script src="selection-engine.js?v=2"></script>
+  <script src="retouch-engine.js?v=2"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

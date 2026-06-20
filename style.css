@@ -154,6 +154,20 @@ header p {
 .workflow-summary strong { font-size: 0.92rem; }
 .workflow-summary span { color: var(--text-muted); font-size: 0.76rem; }
 .workflow-filters { display: flex; gap: 0.35rem; flex-wrap: wrap; justify-content: flex-end; }
+.workflow-actions { display: flex; gap: 0.35rem; flex-shrink: 0; }
+
+.btn-workflow {
+  border: 1px solid rgba(123, 110, 246, 0.35);
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-radius: 7px;
+  padding: 0.42rem 0.58rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-workflow:hover { border-color: var(--accent); color: white; }
 
 .filter-btn {
   border: 1px solid var(--border);
@@ -403,6 +417,8 @@ header p {
 
 .thumb-item.ready .thumb-status { opacity: 1; }
 .thumb-item.filter-hidden { display: none; }
+.thumb-item.export-excluded img { opacity: 0.34; filter: grayscale(0.75); }
+.thumb-item.export-excluded { border-color: rgba(251, 191, 36, 0.45); }
 
 .thumb-review-mark {
   position: absolute;
@@ -464,6 +480,11 @@ header p {
   background: rgba(251, 191, 36, 0.08);
 }
 
+.review-card.export-excluded {
+  border-color: rgba(107, 107, 122, 0.5);
+  background: rgba(107, 107, 122, 0.08);
+}
+
 .review-card-title { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
 .review-card-title strong { font-size: 0.9rem; }
 .review-card-title span { color: var(--text-muted); font-size: 0.67rem; text-align: right; }
@@ -487,6 +508,22 @@ header p {
 
 .btn-review:hover { border-color: var(--accent); }
 .btn-review:disabled { opacity: 0.45; cursor: default; }
+
+.btn-selection {
+  width: 100%;
+  margin-top: 0.5rem;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 7px;
+  padding: 0.58rem;
+  background: rgba(251, 191, 36, 0.08);
+  color: #fbbf24;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-selection.is-excluded { border-color: rgba(74, 222, 128, 0.3); background: var(--green-dim); color: var(--green); }
+.btn-selection:disabled { opacity: 0.45; cursor: default; }
 
 .control-group {
   display: flex;
@@ -972,7 +1009,7 @@ select {
   }
 
   .workflow-bar {
-    min-height: 92px;
+    min-height: 136px;
     padding: 0.5rem 0.65rem;
     align-items: flex-start;
     flex-direction: column;
@@ -981,6 +1018,8 @@ select {
 
   .workflow-summary { width: 100%; flex-direction: row; justify-content: space-between; align-items: baseline; }
   .workflow-filters { width: 100%; justify-content: stretch; flex-wrap: nowrap; overflow-x: auto; }
+  .workflow-actions { width: 100%; }
+  .btn-workflow { flex: 1; min-height: 36px; }
   .filter-btn { flex: 1 0 auto; min-height: 36px; }
 
   .comparison-container {

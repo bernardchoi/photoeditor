@@ -14,10 +14,14 @@ const MAX_EXPORT_PIXELS = 18_000_000;
 const MAX_EXPORT_EDGE = 6500;
 const ZIP_CHUNK_BYTES = 120 * 1024 * 1024;
 const {
-  evaluateQualitySignals, isDuplicateCandidate, colorDistance, getSafeExportDimensions, shouldFlushZip,
+  evaluateQualitySignals, colorDistance, getSafeExportDimensions, shouldFlushZip,
+  rankPhotoForExport, buildDuplicateGroups,
 } = window.SelectionEngine;
 window.AutoRetouchDiagnostics = window.SelectionEngine;
-const { luminance, transformLuminance, applySmartPixel, adjustLuminancePixel } = window.RetouchEngine;
+const {
+  luminance, transformLuminance, applySmartPixel, adjustLuminancePixel,
+  applyBasicAdjustmentsPixel, getLocalLiftWeight,
+} = window.RetouchEngine;
 
 const DEFAULT_PARAMS = Object.freeze({
   autoStrength: 70,
@@ -181,6 +185,9 @@ async function loadImages(files, isFirst) {
       workflow: null,
       reviewApproved: false,
       validationResult: null,
+      exportIncluded: true,
+      selectionManual: false,
+      autoExcluded: false,
       eventGroup: null,
       displayW: 0,
       displayH: 0,
@@ -382,6 +389,7 @@ async function analyzeEventPhotos(start = 0) {
       aspect: frame.imageData.width / frame.imageData.height,
       issues: verdict.details.map(item => item.label),
       issueDetails: verdict.details,
+      baseQualityScore: verdict.score,
       qualityScore: verdict.score,
       confidence: verdict.confidence,
       duplicateOf: null,
@@ -412,21 +420,16 @@ async function analyzeEventPhotos(start = 0) {
 function classifyDuplicatesAndGroups() {
   let group = 1;
   let previous = null;
-  state.photos.forEach((p, i) => {
+  state.photos.forEach(p => {
     const w = p.workflow;
     if (!w) return;
-    for (let j = 0; j < i; j++) {
-      const other = state.photos[j].workflow;
-      if (!other) continue;
-      if (isDuplicateCandidate(other, w)) {
-        w.duplicateOf = j;
-        w.issues.push(`${j + 1}번과 유사한 사진`);
-        w.issueDetails.push({ code: 'duplicate', label: `${j + 1}번과 유사한 사진`, confidence: 0.9, penalty: 30 });
-        w.qualityScore = Math.max(0, w.qualityScore - 30);
-        w.confidence = Math.max(w.confidence, 0.9);
-        break;
-      }
-    }
+    w.issueDetails = w.issueDetails.filter(item => item.code !== 'duplicate');
+    w.issues = w.issueDetails.map(item => item.label);
+    w.qualityScore = w.baseQualityScore;
+    w.duplicateOf = null;
+    w.bestOfGroup = false;
+    p.autoExcluded = false;
+    if (!p.selectionManual) p.exportIncluded = true;
     if (previous) {
       const sceneColorDistance = colorDistance(w.avgColor, previous.avgColor);
       const sameEnvironment = w.corr.environment === previous.corr.environment;
@@ -435,6 +438,27 @@ function classifyDuplicatesAndGroups() {
     }
     p.eventGroup = group;
     previous = w;
+  });
+
+  const workflows = state.photos.map(p => p.workflow);
+  buildDuplicateGroups(workflows).forEach(indices => {
+    const bestIdx = indices.reduce((best, index) => (
+      rankPhotoForExport(workflows[index]) > rankPhotoForExport(workflows[best]) ? index : best
+    ), indices[0]);
+    workflows[bestIdx].bestOfGroup = true;
+    indices.forEach(index => {
+      if (index === bestIdx) return;
+      const p = state.photos[index];
+      const w = workflows[index];
+      w.duplicateOf = bestIdx;
+      const label = `${bestIdx + 1}번이 더 좋은 추천 사진`;
+      w.issueDetails.push({ code: 'duplicate', label, confidence: 0.92, penalty: 30 });
+      w.issues = w.issueDetails.map(item => item.label);
+      w.qualityScore = Math.max(0, w.baseQualityScore - 30);
+      w.confidence = Math.max(w.confidence, 0.92);
+      p.autoExcluded = true;
+      if (!p.selectionManual) p.exportIncluded = false;
+    });
   });
 }
 
@@ -742,7 +766,8 @@ function renderThumbs() {
     const item = document.createElement('div');
     const reviewState = getPhotoReviewState(p);
     item.className = 'thumb-item' + (p.ready ? ' ready' : '') + (i === state.activeIdx ? ' active' : '')
-      + ` review-${reviewState}` + (matchesReviewFilter(p) ? '' : ' filter-hidden');
+      + ` review-${reviewState}` + (p.exportIncluded === false ? ' export-excluded' : '')
+      + (matchesReviewFilter(p) ? '' : ' filter-hidden');
     item.dataset.idx = i;
 
     const img = document.createElement('img');
@@ -758,7 +783,7 @@ function renderThumbs() {
 
     const reviewMark = document.createElement('span');
     reviewMark.className = 'thumb-review-mark';
-    reviewMark.textContent = reviewState === 'review' ? '!' : reviewState === 'duplicate' ? '=' : '✓';
+    reviewMark.textContent = p.exportIncluded === false ? '×' : reviewState === 'review' ? '!' : reviewState === 'duplicate' ? '=' : '✓';
 
     item.append(img, dot, reviewMark, num);
     item.addEventListener('click', () => setActive(i));
@@ -766,13 +791,15 @@ function renderThumbs() {
   });
 
   // Show/hide download-all
-  const multi = state.photos.length > 1;
+  const includedCount = state.photos.filter(p => p.exportIncluded !== false).length;
+  const multi = state.photos.length > 1 && includedCount > 0;
   downloadAllBtn.classList.toggle('hidden', !multi);
-  totalCountEl.textContent = state.photos.length;
+  totalCountEl.textContent = includedCount;
   updateCounter();
 }
 
 function getPhotoReviewState(p) {
+  if (p.exportIncluded === false) return 'excluded';
   if (p.reviewApproved) return 'good';
   if (p.workflow?.duplicateOf !== null && p.workflow?.duplicateOf !== undefined) return 'duplicate';
   if (p.workflow && p.workflow.issues.length === 0) return 'good';
@@ -781,16 +808,21 @@ function getPhotoReviewState(p) {
 
 function matchesReviewFilter(p) {
   if (state.reviewFilter === 'all') return true;
+  if (state.reviewFilter === 'excluded') return p.exportIncluded === false;
+  if (state.reviewFilter === 'duplicate') return p.workflow?.duplicateOf !== null && p.workflow?.duplicateOf !== undefined;
   const status = getPhotoReviewState(p);
   if (state.reviewFilter === 'review') return status === 'review';
   return status === state.reviewFilter;
 }
 
 function updateWorkflowUI() {
-  const counts = { all: state.photos.length, review: 0, good: 0, duplicate: 0 };
+  const counts = { all: state.photos.length, review: 0, good: 0, duplicate: 0, excluded: 0 };
   state.photos.forEach(p => {
     const status = getPhotoReviewState(p);
-    if (counts[status] !== undefined) counts[status]++;
+    if (status === 'review') counts.review++;
+    if (status === 'good') counts.good++;
+    if (p.workflow?.duplicateOf !== null && p.workflow?.duplicateOf !== undefined) counts.duplicate++;
+    if (p.exportIncluded === false) counts.excluded++;
   });
   Object.entries(counts).forEach(([key, value]) => {
     const el = $(`filter-${key}-count`);
@@ -800,9 +832,11 @@ function updateWorkflowUI() {
   const validated = state.photos.filter(p => p.validationResult).length;
   const correct = state.photos.filter(p => p.validationResult === 'correct').length;
   const accuracy = validated ? ` · 선별 검증 ${correct}/${validated} (${Math.round(correct / validated * 100)}%)` : '';
+  const included = state.photos.length - counts.excluded;
   $('workflow-summary').textContent = (counts.review || counts.duplicate
-    ? `${groups}개 촬영 묶음 · 확인할 사진 ${counts.review + counts.duplicate}장`
-    : `${groups}개 촬영 묶음 · 모든 사진 자동 검수 완료`) + accuracy;
+    ? `${groups}개 촬영 묶음 · 추천 출력 ${included}장 · 제외 ${counts.excluded}장`
+    : `${groups}개 촬영 묶음 · 추천 출력 ${included}장`) + accuracy;
+  totalCountEl.textContent = included;
 }
 
 function updateReviewUI(p) {
@@ -812,19 +846,24 @@ function updateReviewUI(p) {
     $('event-group-label').textContent = '촬영 묶음 분석 중';
     $('review-approve-btn').disabled = true;
     $('review-reject-btn').disabled = true;
+    $('toggle-selection-btn').disabled = true;
     return;
   }
   const status = getPhotoReviewState(p);
   $('event-group-label').textContent = `촬영 묶음 ${p.eventGroup} · 색감 통일 적용`;
-  $('review-status').textContent = status === 'good' ? '검수 완료' : status === 'duplicate' ? '중복 후보' : '확인 필요';
+  $('review-status').textContent = status === 'excluded' ? '출력 제외' : status === 'good' ? '검수 완료' : status === 'duplicate' ? '중복 후보' : '확인 필요';
   const confidence = Math.round((p.workflow.confidence || 0) * 100);
-  const resultText = p.workflow.issues.length ? p.workflow.issues.join(' · ') : '초점과 노출이 양호합니다.';
+  const resultText = p.workflow.bestOfGroup ? '유사 사진 중 추천본' : p.workflow.issues.length ? p.workflow.issues.join(' · ') : '초점과 노출이 양호합니다.';
   $('review-detail').textContent = `${resultText} · 자동 판단 ${confidence}% · 품질 ${p.workflow.qualityScore}점`;
   $('review-approve-btn').disabled = false;
   $('review-reject-btn').disabled = false;
+  $('toggle-selection-btn').disabled = false;
   $('review-approve-btn').textContent = p.validationResult === 'correct' ? '맞음으로 기록됨' : '자동 판단 맞음';
   $('review-reject-btn').textContent = p.validationResult === 'incorrect' ? '틀림으로 기록됨' : '판단이 틀림';
   $('review-card').classList.toggle('needs-review', status === 'review' || status === 'duplicate');
+  $('review-card').classList.toggle('export-excluded', p.exportIncluded === false);
+  $('toggle-selection-btn').textContent = p.exportIncluded === false ? '이 사진 다시 출력에 포함' : '이 사진 출력에서 제외';
+  $('toggle-selection-btn').classList.toggle('is-excluded', p.exportIncluded === false);
 }
 
 function updateThumbActive() {
@@ -1015,19 +1054,12 @@ function applySmartAuto(d, corr, amount) {
 }
 
 function applyBCS(d, br, co, sa) {
-  const bv = br * 2.55;
-  const cf = (259 * (co + 255)) / (255 * (259 - co));
-  const sf = (sa + 100) / 100;
+  if (!br && !co && !sa) return;
   for (let i = 0; i < d.length; i += 4) {
-    let r = d[i], g = d[i+1], b = d[i+2];
-    r = clamp(r + bv); g = clamp(g + bv); b = clamp(b + bv);
-    r = clamp(cf * (r - 128) + 128);
-    g = clamp(cf * (g - 128) + 128);
-    b = clamp(cf * (b - 128) + 128);
-    const gr = 0.299 * r + 0.587 * g + 0.114 * b;
-    d[i]   = clamp(gr + (r - gr) * sf);
-    d[i+1] = clamp(gr + (g - gr) * sf);
-    d[i+2] = clamp(gr + (b - gr) * sf);
+    const corrected = applyBasicAdjustmentsPixel(d[i], d[i+1], d[i+2], br, co, sa);
+    d[i] = clamp(corrected[0]);
+    d[i+1] = clamp(corrected[1]);
+    d[i+2] = clamp(corrected[2]);
   }
 }
 
@@ -1163,8 +1195,8 @@ function autoFaceLight(ctx, W, H, detections, adjustments, strength) {
         const distance = nx * nx + ny * ny;
         if (distance >= 1) continue;
         const weight = Math.pow(1 - distance, 1.7);
-        const delta = lift * weight;
         const i = (y * W + x) * 4;
+        const delta = lift * weight * getLocalLiftWeight(d[i], d[i+1], d[i+2]);
         const currentY = luminance(d[i], d[i+1], d[i+2]);
         const corrected = adjustLuminancePixel(d[i], d[i+1], d[i+2], Math.min(255, currentY + delta));
         d[i] = clamp(corrected[0]);
@@ -1483,10 +1515,50 @@ $('review-reject-btn').addEventListener('click', () => {
   if (!p?.workflow) return;
   p.validationResult = 'incorrect';
   p.reviewApproved = false;
+  if (p.autoExcluded) {
+    p.exportIncluded = true;
+    p.selectionManual = true;
+  }
   updateReviewUI(p);
   renderThumbs();
   updateWorkflowUI();
   showToast('오판으로 기록했습니다. 이 결과는 선별 기준 조정에 사용할 수 있습니다.', 'info');
+});
+
+$('toggle-selection-btn').addEventListener('click', () => {
+  const p = state.photos[state.activeIdx];
+  if (!p) return;
+  p.exportIncluded = p.exportIncluded === false;
+  p.selectionManual = true;
+  updateReviewUI(p);
+  renderThumbs();
+  updateWorkflowUI();
+  if (!matchesReviewFilter(p)) {
+    const next = state.photos.findIndex(matchesReviewFilter);
+    if (next >= 0) setActive(next);
+  }
+});
+
+$('select-recommended-btn').addEventListener('click', () => {
+  state.photos.forEach(p => {
+    p.selectionManual = false;
+    p.exportIncluded = !p.autoExcluded;
+  });
+  renderThumbs();
+  updateWorkflowUI();
+  updateReviewUI(state.photos[state.activeIdx]);
+  showToast('중복 사진 중 품질이 가장 좋은 추천본만 선택했습니다.', 'info');
+});
+
+$('select-all-btn').addEventListener('click', () => {
+  state.photos.forEach(p => {
+    p.selectionManual = true;
+    p.exportIncluded = true;
+  });
+  renderThumbs();
+  updateWorkflowUI();
+  updateReviewUI(state.photos[state.activeIdx]);
+  showToast('모든 사진을 출력에 포함했습니다.', 'info');
 });
 
 $('apply-all-btn').addEventListener('click', () => {
@@ -1721,9 +1793,16 @@ async function exportAll() {
     showToast('ZIP 기능을 불러오지 못했습니다. 인터넷 연결 후 새로고침해주세요.');
     return;
   }
+  const exportItems = state.photos
+    .map((photo, index) => ({ photo, index }))
+    .filter(item => item.photo.exportIncluded !== false);
+  if (!exportItems.length) {
+    showToast('출력에 포함된 사진이 없습니다. 사진을 한 장 이상 포함해주세요.');
+    return;
+  }
   downloadAllBtn.disabled = true;
-  const total = state.photos.length;
-  showProc('전체 사진 자동 처리 중...', `0 / ${total}장`);
+  const total = exportItems.length;
+  showProc('선택 사진 자동 처리 중...', `0 / ${total}장`);
   await tick();
   let zip = new JSZip();
   let zipBytes = 0, zipCount = 0, chunkStart = 0, chunkNumber = 1;
@@ -1749,15 +1828,16 @@ async function exportAll() {
   }
 
   try {
-    for (let i = 0; i < total; i++) {
+    for (let position = 0; position < total; position++) {
       throwIfCancelled();
+      const { photo, index } = exportItems[position];
       setProc('사진별 자동 보정 중...');
-      procSub.textContent = `${i + 1} / ${total}장 — ${state.photos[i].name}`;
-      setProcProgress(i / total);
+      procSub.textContent = `${position + 1} / ${total}장 — ${photo.name}`;
+      setProcProgress(position / total);
       await yieldToBrowser();
-      await ensurePhotoAnalysis(i);
-      const result = await buildPhotoBlob(i);
-      if (shouldFlushZip(zipBytes, result.blob.size, zipCount, ZIP_CHUNK_BYTES)) await flushZip(i, false);
+      await ensurePhotoAnalysis(index);
+      const result = await buildPhotoBlob(index);
+      if (shouldFlushZip(zipBytes, result.blob.size, zipCount, ZIP_CHUNK_BYTES)) await flushZip(position, false);
       zip.file(result.filename, result.blob);
       zipBytes += result.blob.size;
       zipCount++;
@@ -1766,7 +1846,7 @@ async function exportAll() {
     await flushZip(total, true);
     setProcProgress(1);
     const parts = chunkNumber - 1;
-    showToast(parts > 1 ? `${total}장을 ${parts}개 ZIP으로 안전하게 나눠 저장했습니다.` : `${total}장을 ZIP 파일로 저장했습니다.`, 'info');
+    showToast(parts > 1 ? `선택한 ${total}장을 ${parts}개 ZIP으로 나눠 저장했습니다.` : `선택한 ${total}장을 ZIP 파일로 저장했습니다.`, 'info');
   } catch (e) {
     if (e.name === 'AbortError') {
       showToast('전체 저장을 중지했습니다. 이미 저장된 ZIP은 사용할 수 있습니다.', 'info');

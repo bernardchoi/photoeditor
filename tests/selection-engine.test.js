@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const {
   evaluateQualitySignals, isDuplicateCandidate, getSafeExportDimensions, shouldFlushZip,
+  rankPhotoForExport, buildDuplicateGroups,
 } = require('../selection-engine.js');
 
 const codes = metrics => evaluateQualitySignals(metrics).details.map(item => item.code);
@@ -29,4 +30,13 @@ assert.deepEqual(getSafeExportDimensions(6000, 4000), { width: 5196, height: 346
 assert.equal(shouldFlushZip(100, 30, 5, 120), true);
 assert.equal(shouldFlushZip(0, 130, 0, 120), false);
 
-console.log('selection-engine: 10 checks passed');
+assert.ok(rankPhotoForExport({ qualityScore: 90, focusScore: 14, faceCount: 4 })
+  > rankPhotoForExport({ qualityScore: 82, focusScore: 7, faceCount: 4 }));
+const duplicateGroups = buildDuplicateGroups([
+  base,
+  { ...base, hash: `${'0'.repeat(62)}11` },
+  { ...base, hash: '1'.repeat(64), avgColor: [30, 40, 50] },
+]);
+assert.deepEqual(duplicateGroups, [[0, 1]]);
+
+console.log('selection-engine: 12 checks passed');
