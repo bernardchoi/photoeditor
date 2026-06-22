@@ -189,6 +189,55 @@
     return { exposureEV, shadowLift, highlightCompression, contrastBoost };
   }
 
+  function evaluateCorrectionSafety(data, corr) {
+    let beforeClip = 0, afterClip = 0, count = 0, totalShift = 0, totalSaturationShift = 0;
+    for (let i = 0; i < data.length; i += 80) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const beforeMax = Math.max(r, g, b), beforeMin = Math.min(r, g, b);
+      if (r <= 1 || g <= 1 || b <= 1 || r >= 254 || g >= 254 || b >= 254) beforeClip++;
+      const [rr, gg, bb] = applySmartPixel(r, g, b, corr, 1);
+      if (rr <= 1 || gg <= 1 || bb <= 1 || rr >= 254 || gg >= 254 || bb >= 254) afterClip++;
+      totalShift += (Math.abs(rr - r) + Math.abs(gg - g) + Math.abs(bb - b)) / 3;
+      const beforeSaturation = beforeMax > 0 ? (beforeMax - beforeMin) / beforeMax : 0;
+      const afterMax = Math.max(rr, gg, bb), afterMin = Math.min(rr, gg, bb);
+      const afterSaturation = afterMax > 0 ? (afterMax - afterMin) / afterMax : 0;
+      totalSaturationShift += Math.abs(afterSaturation - beforeSaturation);
+      count++;
+    }
+    const clipIncrease = Math.max(0, (afterClip - beforeClip) / Math.max(1, count));
+    const averageShift = totalShift / Math.max(1, count);
+    const saturationShift = totalSaturationShift / Math.max(1, count);
+    const clippingScale = Math.max(0.35, 1 - clipIncrease * 35);
+    const shiftScale = averageShift > 22 ? Math.max(0.5, 22 / averageShift) : 1;
+    const colorScale = saturationShift > 0.08 ? Math.max(0.6, 0.08 / saturationShift) : 1;
+    return {
+      guardScale: Math.min(clippingScale, shiftScale, colorScale),
+      clipIncrease, averageShift, saturationShift,
+    };
+  }
+
+  function applyPipelinePixel(r, g, b, corr, params) {
+    let pixel = [r, g, b];
+    const autoStrength = ((params.autoStrength || 0) / 100) * (corr.guardScale || 1);
+    if (autoStrength > 0) pixel = applySmartPixel(...pixel, corr, autoStrength);
+    if (params.brightness || params.contrast || params.saturation) {
+      pixel = applyBasicAdjustmentsPixel(
+        ...pixel, params.brightness, params.contrast, params.saturation,
+      );
+    }
+    if (params.temperature) {
+      const shift = params.temperature / 100 * 0.08;
+      pixel = applySmartPixel(...pixel, {
+        exposureEV: 0, shadowLift: 0, highlightCompression: 0, contrastBoost: 0,
+        wb: [1 + shift, 1, 1 - shift], wbConfidence: 1,
+      }, 1);
+    }
+    if (params.highlights || params.shadows) {
+      pixel = applyTonalAdjustmentsPixel(...pixel, params.highlights, params.shadows);
+    }
+    return pixel;
+  }
+
   return Object.freeze({
     luminance,
     transformLuminance,
@@ -199,6 +248,8 @@
     applyTonalAdjustmentsPixel,
     computeDetailDelta,
     deriveAutoTone,
+    evaluateCorrectionSafety,
+    applyPipelinePixel,
     fitGamut,
   });
 });

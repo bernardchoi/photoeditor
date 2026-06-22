@@ -1,7 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { createPhotoSnapshot, applyPhotoSnapshot } = require('../project-store.js');
+const {
+  createPhotoSnapshot, applyPhotoSnapshot, createFileSignature, assessProjectIntegrity,
+} = require('../project-store.js');
 
 const source = {
   params: { autoStrength: 55, saturation: 4 }, paramsCustomized: true,
@@ -16,4 +18,16 @@ assert.equal(restored.cropRestored, true);
 assert.equal(restored.environmentOverride, 'indoor');
 assert.equal(restored.exportIncluded, false);
 assert.equal(restored.validationResult, 'correct');
+const files = [{ name: 'a.jpg', blob: { size: 120, type: 'image/jpeg' }, lastModified: 1 }];
+const metadata = {
+  schemaVersion: 2,
+  photos: [{}],
+  fileSignatures: [createFileSignature(files[0])],
+};
+assert.equal(assessProjectIntegrity(files, metadata).valid, true);
+assert.equal(assessProjectIntegrity(files, { ...metadata, photos: [] }).valid, false);
+assert.deepEqual(
+  assessProjectIntegrity(files, { photos: [{}] }),
+  { valid: true, reason: 'legacy' },
+);
 console.log('project-store: snapshot restore checks passed');

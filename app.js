@@ -19,15 +19,19 @@ const {
 } = window.SelectionEngine;
 window.AutoRetouchDiagnostics = window.SelectionEngine;
 const {
-  luminance, transformLuminance, applySmartPixel, adjustLuminancePixel,
-  applyBasicAdjustmentsPixel, getLocalLiftWeight, applyTonalAdjustmentsPixel,
-  computeDetailDelta, deriveAutoTone,
+  luminance, adjustLuminancePixel, getLocalLiftWeight,
+  computeDetailDelta, deriveAutoTone, evaluateCorrectionSafety,
+  applyPipelinePixel,
 } = window.RetouchEngine;
 const {
   createPhotoSnapshot, applyPhotoSnapshot, replaceFiles: storeProjectFiles,
   saveMetadata: storeProjectMetadata, loadProject: loadStoredProject,
-  clearProject: clearStoredProject,
+  clearProject: clearStoredProject, createFileSignature, assessProjectIntegrity,
 } = window.ProjectStore;
+const {
+  getBatchProfile, mapWithConcurrency, assessStorageCapacity, getCapabilityReport,
+} = window.BatchEngine;
+window.AutoRetouchCapabilities = getCapabilityReport(window);
 
 const DEFAULT_PARAMS = Object.freeze({
   autoStrength: 70,
@@ -54,6 +58,11 @@ let faceApiReadyPromise = null;
 let projectSaveTimer = null;
 let projectRestoring = false;
 let projectFilesPersisted = false;
+let projectStorageAllowed = true;
+let storagePersistenceRequested = false;
+let retouchWorker = null;
+let retouchWorkerSequence = 0;
+const retouchWorkerRequests = new Map();
 
 // ── DOM ───────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -135,6 +144,7 @@ $('reset-btn').addEventListener('click', () => {
   state.activeIdx = -1;
   state.reviewFilter = 'all';
   projectFilesPersisted = false;
+  projectStorageAllowed = true;
   state.params = makeDefaultParams();
   editor.classList.add('hidden');
   uploadZone.style.display = '';
@@ -163,27 +173,35 @@ function classifyFiles(files) {
 }
 
 // ── File Handling ─────────────────────────────────────────────
-function handleFiles(files) {
+async function handleFiles(files) {
   const ok = classifyFiles(files);
   if (!ok.length) return;
+  projectStorageAllowed = await prepareProjectStorage(ok);
   uploadZone.style.display = 'none';
   editor.classList.remove('hidden');
-  loadImages(ok, true);
+  await loadImages(ok, true);
 }
 
 async function addMoreFiles(files) {
   const ok = classifyFiles(files);
   if (!ok.length) return;
+  projectStorageAllowed = await prepareProjectStorage([
+    ...state.photos.map(photo => photo.sourceFile).filter(Boolean), ...ok,
+  ]);
   await loadImages(ok, false);
 }
 
 async function loadImages(files, isFirst, options = {}) {
   showProc('사진 불러오는 중...', '');
   const start = state.photos.length;
-  const deviceMemory = navigator.deviceMemory || 4;
-  const concurrency = window.innerWidth <= 768 || deviceMemory <= 4 ? 2 : 3;
+  const batchProfile = getBatchProfile({
+    count: files.length,
+    viewportWidth: window.innerWidth,
+    deviceMemory: navigator.deviceMemory || 4,
+    hardwareConcurrency: navigator.hardwareConcurrency || 4,
+  });
   let decodedCount = 0;
-  const images = await mapWithConcurrency(files, concurrency, async file => {
+  const images = await mapWithConcurrency(files, batchProfile.decodeConcurrency, async file => {
     const image = await loadImageFile(file);
     decodedCount++;
     procSub.textContent = `${decodedCount} / ${files.length}장 디코딩`;
@@ -229,7 +247,7 @@ async function loadImages(files, isFirst, options = {}) {
   updateCounter();
   renderThumbs();
 
-  if (!options.skipPersist) {
+  if (!options.skipPersist && projectStorageAllowed) {
     try {
       await storeProjectFiles(state.photos.map(p => p.sourceFile));
       projectFilesPersisted = true;
@@ -250,19 +268,6 @@ async function loadImages(files, isFirst, options = {}) {
   }
   await saveProjectState();
   hideProc();
-}
-
-async function mapWithConcurrency(items, limit, worker) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  const run = async () => {
-    while (cursor < items.length) {
-      const index = cursor++;
-      results[index] = await worker(items[index], index);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, run));
-  return results;
 }
 
 async function loadImageFile(file) {
@@ -395,8 +400,13 @@ async function analyzeEventPhotos(start = 0) {
   showProc('행사 사진 자동 정리 중...', '초점 · 노출 · 중복 · 촬영 묶음 확인');
   if (faceApiReadyPromise) await faceApiReadyPromise;
   const remaining = state.photos.length - start;
-  const analysisSide = remaining > 80 ? 420 : remaining > 40 ? 520 : 720;
-  const detectorSize = remaining > 40 ? 320 : 416;
+  const batchProfile = getBatchProfile({
+    count: remaining,
+    viewportWidth: window.innerWidth,
+    deviceMemory: navigator.deviceMemory || 4,
+    hardwareConcurrency: navigator.hardwareConcurrency || 4,
+  });
+  const { analysisSide, detectorSize } = batchProfile;
 
   for (let i = start; i < state.photos.length; i++) {
     throwIfCancelled();
@@ -479,7 +489,7 @@ function classifyDuplicatesAndGroups() {
   state.photos.forEach(p => {
     const w = p.workflow;
     if (!w) return;
-    w.issueDetails = w.issueDetails.filter(item => item.code !== 'duplicate');
+    w.issueDetails = w.issueDetails.filter(item => !['duplicate', 'missing_face'].includes(item.code));
     w.issues = w.issueDetails.map(item => item.label);
     w.qualityScore = w.baseQualityScore;
     w.duplicateOf = null;
@@ -498,14 +508,24 @@ function classifyDuplicatesAndGroups() {
 
   const workflows = state.photos.map(p => p.workflow);
   buildDuplicateGroups(workflows).forEach(indices => {
-    const bestIdx = indices.reduce((best, index) => (
+    const maxFaceCount = Math.max(...indices.map(index => workflows[index].faceCount || 0));
+    const bestCandidates = maxFaceCount >= 3
+      ? indices.filter(index => (workflows[index].faceCount || 0) === maxFaceCount)
+      : indices;
+    const bestIdx = bestCandidates.reduce((best, index) => (
       rankPhotoForExport(workflows[index]) > rankPhotoForExport(workflows[best]) ? index : best
-    ), indices[0]);
+    ), bestCandidates[0]);
     workflows[bestIdx].bestOfGroup = true;
     indices.forEach(index => {
       if (index === bestIdx) return;
       const p = state.photos[index];
       const w = workflows[index];
+      const faceGap = maxFaceCount - (w.faceCount || 0);
+      if (maxFaceCount >= 3 && faceGap > 0) {
+        const faceLabel = `유사 사진보다 얼굴 ${faceGap}명 적게 감지`;
+        w.issueDetails.push({ code: 'missing_face', label: faceLabel, confidence: 0.76, penalty: 12 });
+        w.qualityScore = Math.max(0, w.qualityScore - 12);
+      }
       w.duplicateOf = bestIdx;
       const similarityConfidence = duplicateConfidence(workflows[bestIdx], w);
       const label = similarityConfidence >= 0.72
@@ -513,7 +533,7 @@ function classifyDuplicatesAndGroups() {
         : `${bestIdx + 1}번과 유사한 사진 확인`;
       w.issueDetails.push({ code: 'duplicate', label, confidence: similarityConfidence, penalty: 30 });
       w.issues = w.issueDetails.map(item => item.label);
-      w.qualityScore = Math.max(0, w.baseQualityScore - 30);
+      w.qualityScore = Math.max(0, w.qualityScore - 30);
       w.confidence = Math.max(w.confidence, similarityConfidence);
       p.autoExcluded = similarityConfidence >= 0.72;
       if (!p.selectionManual) p.exportIncluded = !p.autoExcluded;
@@ -1053,25 +1073,10 @@ function computeAutoCorr(imageData, environmentOverride = 'auto') {
     stats: { p05, p10, median, p95, p99, dynamicRange, clippedDark: clippedDark / n, clippedBright: clippedBright / n },
     guardScale: 1,
   };
-  correction.guardScale = evaluateCorrectionSafety(d, correction);
+  const safety = evaluateCorrectionSafety(d, correction);
+  correction.guardScale = safety.guardScale;
+  correction.safety = safety;
   return correction;
-}
-
-function evaluateCorrectionSafety(d, corr) {
-  let before = 0, after = 0, count = 0, totalShift = 0;
-  for (let i = 0; i < d.length; i += 80) {
-    const r = d[i], g = d[i+1], b = d[i+2];
-    if (r <= 1 || g <= 1 || b <= 1 || r >= 254 || g >= 254 || b >= 254) before++;
-    const [rr, gg, bb] = applySmartPixel(r, g, b, corr, 1);
-    if (rr <= 1 || gg <= 1 || bb <= 1 || rr >= 254 || gg >= 254 || bb >= 254) after++;
-    totalShift += (Math.abs(rr - r) + Math.abs(gg - g) + Math.abs(bb - b)) / 3;
-    count++;
-  }
-  const clipIncrease = Math.max(0, (after - before) / Math.max(1, count));
-  const averageShift = totalShift / Math.max(1, count);
-  const clippingScale = Math.max(0.35, 1 - clipIncrease * 35);
-  const shiftScale = averageShift > 22 ? Math.max(0.5, 22 / averageShift) : 1;
-  return Math.min(clippingScale, shiftScale);
 }
 
 // ── Processing Pipeline ───────────────────────────────────────
@@ -1084,10 +1089,7 @@ function applyProcessing() {
   const d  = id.data;
 
   const params = p.params;
-  applySmartAuto(d, p.autoCorr, params.autoStrength);
-  applyBCS(d, params.brightness, params.contrast, params.saturation);
-  applyTemperature(d, params.temperature);
-  applyHighlightsShadows(d, params.highlights, params.shadows);
+  applyBasePixelPipeline(d, p.autoCorr, params);
 
   ctxAfter.putImageData(id, 0, 0);
 
@@ -1105,54 +1107,50 @@ function applyProcessing() {
   updateClip();
 }
 
-function applySmartAuto(d, corr, amount) {
-  const strength = (amount / 100) * corr.guardScale;
-  if (strength <= 0) return;
+function applyBasePixelPipeline(d, corr, params) {
   for (let i = 0; i < d.length; i += 4) {
-    const r = d[i], g = d[i+1], b = d[i+2];
-    const corrected = applySmartPixel(r, g, b, corr, strength);
-    d[i] = clamp(corrected[0]);
-    d[i+1] = clamp(corrected[1]);
-    d[i+2] = clamp(corrected[2]);
+    const pixel = applyPipelinePixel(d[i], d[i + 1], d[i + 2], corr, params);
+    d[i] = clamp(pixel[0]);
+    d[i + 1] = clamp(pixel[1]);
+    d[i + 2] = clamp(pixel[2]);
   }
 }
 
-function applyBCS(d, br, co, sa) {
-  if (!br && !co && !sa) return;
-  for (let i = 0; i < d.length; i += 4) {
-    const corrected = applyBasicAdjustmentsPixel(d[i], d[i+1], d[i+2], br, co, sa);
-    d[i] = clamp(corrected[0]);
-    d[i+1] = clamp(corrected[1]);
-    d[i+2] = clamp(corrected[2]);
-  }
+function getRetouchWorker() {
+  if (retouchWorker || typeof Worker === 'undefined') return retouchWorker;
+  retouchWorker = new Worker('retouch-worker.js?v=1');
+  retouchWorker.addEventListener('message', event => {
+    const request = retouchWorkerRequests.get(event.data.id);
+    if (!request) return;
+    retouchWorkerRequests.delete(event.data.id);
+    if (event.data.error) request.reject(new Error(event.data.error));
+    else request.resolve(event.data.buffer);
+  });
+  retouchWorker.addEventListener('error', error => {
+    retouchWorkerRequests.forEach(request => request.reject(error));
+    retouchWorkerRequests.clear();
+    retouchWorker?.terminate();
+    retouchWorker = null;
+  });
+  return retouchWorker;
 }
 
-// ── Temperature ───────────────────────────────────────────────
-function applyTemperature(d, amount) {
-  if (!amount) return;
-  const shift = amount / 100 * 0.08;
-  const corr = {
-    exposureEV: 0, shadowLift: 0, highlightCompression: 0, contrastBoost: 0,
-    wb: [1 + shift, 1, 1 - shift], wbConfidence: 1,
-  };
-  for (let i = 0; i < d.length; i += 4) {
-    const corrected = applySmartPixel(d[i], d[i+1], d[i+2], corr, 1);
-    d[i] = clamp(corrected[0]);
-    d[i+1] = clamp(corrected[1]);
-    d[i+2] = clamp(corrected[2]);
-  }
-}
-
-// ── Highlights / Shadows ──────────────────────────────────────
-function applyHighlightsShadows(d, highlights, shadows) {
-  if (!highlights && !shadows) return;
-  for (let i = 0; i < d.length; i += 4) {
-    const corrected = applyTonalAdjustmentsPixel(
-      d[i], d[i+1], d[i+2], highlights, shadows,
-    );
-    d[i] = clamp(corrected[0]);
-    d[i+1] = clamp(corrected[1]);
-    d[i+2] = clamp(corrected[2]);
+async function applyBasePixelPipelineAsync(imageData, corr, params) {
+  let worker;
+  try { worker = getRetouchWorker(); }
+  catch (error) { console.warn('Worker unavailable:', error); return null; }
+  if (!worker || imageData.data.length < 4_000_000) return null;
+  const id = ++retouchWorkerSequence;
+  const buffer = imageData.data.buffer;
+  try {
+    const result = new Promise((resolve, reject) => retouchWorkerRequests.set(id, { resolve, reject }));
+    worker.postMessage({ id, buffer, corr, params }, [buffer]);
+    const output = await result;
+    return new ImageData(new Uint8ClampedArray(output), imageData.width, imageData.height);
+  } catch (error) {
+    retouchWorkerRequests.delete(id);
+    console.warn('Worker pixel pass fallback:', error);
+    return null;
   }
 }
 
@@ -1834,12 +1832,16 @@ async function buildPhotoBlob(idx) {
   }
 
   // reuse autoCorr computed at display size — statistically equivalent
-  const id = fx.getImageData(0, 0, workW, workH);
-  const d  = id.data;
-  applySmartAuto(d, p.autoCorr, params.autoStrength);
-  applyBCS(d, params.brightness, params.contrast, params.saturation);
-  applyTemperature(d, params.temperature);
-  applyHighlightsShadows(d, params.highlights, params.shadows);
+  let id = fx.getImageData(0, 0, workW, workH);
+  const workerResult = await applyBasePixelPipelineAsync(id, p.autoCorr, params);
+  if (workerResult) {
+    id = workerResult;
+  } else {
+    // The original canvas remains available if a worker cannot be used.
+    if (id.data.byteLength === 0) id = fx.getImageData(0, 0, workW, workH);
+    const d = id.data;
+    applyBasePixelPipeline(d, p.autoCorr, params);
+  }
   fx.putImageData(id, 0, 0);
 
   let scaledDetections = [];
@@ -2035,14 +2037,40 @@ function updateProjectStatus(text) {
   $('project-status').textContent = text;
 }
 
+async function prepareProjectStorage(files) {
+  if (!navigator.storage) return true;
+  try {
+    if (!storagePersistenceRequested && navigator.storage.persist) {
+      storagePersistenceRequested = true;
+      await navigator.storage.persist();
+    }
+    if (!navigator.storage.estimate) return true;
+    const estimate = await navigator.storage.estimate();
+    const requiredBytes = files.reduce((sum, file) => sum + (file?.size || 0), 0) * 1.12;
+    const health = assessStorageCapacity(estimate.usage || 0, estimate.quota || 0, requiredBytes);
+    if (!health.canStore) {
+      updateProjectStatus('저장 공간 부족');
+      showToast('사진은 처리할 수 있지만 브라우저 자동 저장 공간이 부족합니다.', 'info');
+    } else if (health.level === 'warning') {
+      updateProjectStatus('저장 공간 주의');
+    }
+    return health.canStore;
+  } catch (error) {
+    console.warn('Storage estimate failed:', error);
+    return true;
+  }
+}
+
 function getProjectMetadata() {
   return {
+    schemaVersion: 2,
     selectedSize: state.selectedSize,
     outputIntent: state.outputIntent,
     activeIdx: state.activeIdx,
     reviewFilter: state.reviewFilter,
     format: $('format-select').value,
     quality: +$('quality').value,
+    fileSignatures: state.photos.map(photo => createFileSignature(photo.sourceFile)),
     photos: state.photos.map(createPhotoSnapshot),
   };
 }
@@ -2081,6 +2109,13 @@ async function restoreProject() {
       updateProjectStatus('저장된 작업 없음');
       return;
     }
+    const integrity = assessProjectIntegrity(saved.files, saved.metadata);
+    if (!integrity.valid) {
+      await clearStoredProject();
+      updateProjectStatus('저장 작업 손상');
+      showToast('저장된 작업이 완전하지 않아 안전하게 초기화했습니다.', 'info');
+      return;
+    }
     const files = saved.files.map(item => new File([item.blob], item.name, {
       type: item.type || item.blob.type,
       lastModified: item.lastModified,
@@ -2107,6 +2142,7 @@ async function restoreProject() {
     updateProjectStatus('작업 복구 실패');
   } finally {
     projectRestoring = false;
+    if (state.photos.length) scheduleProjectSave();
   }
 }
 
@@ -2115,6 +2151,10 @@ $('save-project-btn').addEventListener('click', async () => {
     showToast('먼저 사진을 불러와주세요.', 'info');
     return;
   }
+  projectStorageAllowed = await prepareProjectStorage(
+    state.photos.map(photo => photo.sourceFile).filter(Boolean),
+  );
+  if (!projectStorageAllowed) return;
   try {
     await storeProjectFiles(state.photos.map(p => p.sourceFile));
     projectFilesPersisted = true;

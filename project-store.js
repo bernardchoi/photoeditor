@@ -41,6 +41,34 @@
     };
   }
 
+  function createFileSignature(file) {
+    return {
+      name: file?.name || '',
+      size: file?.size ?? file?.blob?.size ?? 0,
+      type: file?.type || file?.blob?.type || '',
+      lastModified: file?.lastModified || 0,
+    };
+  }
+
+  function assessProjectIntegrity(files, metadata) {
+    if (!Array.isArray(files) || !metadata) {
+      return { valid: false, reason: 'schema' };
+    }
+    if (!metadata.schemaVersion || metadata.schemaVersion === 1) {
+      const valid = Array.isArray(metadata.photos) && metadata.photos.length === files.length;
+      return { valid, reason: valid ? 'legacy' : 'count' };
+    }
+    if (metadata.schemaVersion !== 2) return { valid: false, reason: 'schema' };
+    if (!Array.isArray(metadata.fileSignatures) || files.length !== metadata.fileSignatures.length
+      || metadata.photos?.length !== files.length) return { valid: false, reason: 'count' };
+    const valid = files.every((file, index) => {
+      const actual = createFileSignature(file);
+      const expected = metadata.fileSignatures[index];
+      return actual.name === expected.name && actual.size === expected.size;
+    });
+    return { valid, reason: valid ? null : 'file' };
+  }
+
   function applyPhotoSnapshot(photo, snapshot) {
     if (!photo || !snapshot) return photo;
     if (snapshot.params) photo.params = { ...photo.params, ...snapshot.params };
@@ -92,6 +120,8 @@
 
   return Object.freeze({
     createPhotoSnapshot,
+    createFileSignature,
+    assessProjectIntegrity,
     applyPhotoSnapshot,
     replaceFiles,
     saveMetadata,

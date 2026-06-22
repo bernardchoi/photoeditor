@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const {
   luminance, transformLuminance, applySmartPixel, adjustLuminancePixel,
   applyBasicAdjustmentsPixel, getLocalLiftWeight, applyTonalAdjustmentsPixel,
-  computeDetailDelta, deriveAutoTone,
+  computeDetailDelta, deriveAutoTone, evaluateCorrectionSafety, applyPipelinePixel,
 } = require('../retouch-engine.js');
 
 const identity = { exposureEV: 0, shadowLift: 0, highlightCompression: 0, contrastBoost: 0, wb: [1, 1, 1], wbConfidence: 1 };
@@ -80,6 +80,18 @@ const flatTone = deriveAutoTone(
   'unknown', { noiseScore: 2, skyRatio: 0 },
 );
 assert.ok(flatTone.contrastBoost > 0);
+const samplePixels = new Uint8ClampedArray(400);
+for (let i = 0; i < samplePixels.length; i += 4) {
+  samplePixels[i] = 110; samplePixels[i + 1] = 105; samplePixels[i + 2] = 100; samplePixels[i + 3] = 255;
+}
+const safeEvaluation = evaluateCorrectionSafety(samplePixels, { ...identity, exposureEV: 0.08, vibrance: 3 });
+assert.ok(safeEvaluation.guardScale > 0.8);
+assert.ok(Number.isFinite(safeEvaluation.averageShift));
+const pipelineIdentity = applyPipelinePixel(70, 110, 150, identity, {
+  autoStrength: 0, brightness: 0, contrast: 0, saturation: 0,
+  temperature: 0, highlights: 0, shadows: 0,
+});
+assert.deepEqual(pipelineIdentity, [70, 110, 150]);
 
 for (const contrast of [-100, -40, 40, 100]) {
   let previous = -1;
